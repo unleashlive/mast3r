@@ -81,19 +81,48 @@ def select_point_interactively(image_path):
     return (float(x), float(y))
 
 
-def find_nearest_match(query_point, matches_ref):
+def find_nearest_match(query_point, matches_ref, pts3d_ref=None, min_height=None):
     """
     Find the index of the match nearest to the query point.
 
     Args:
         query_point: (x, y) tuple of query point coordinates
         matches_ref: (N, 2) array of match coordinates in reference image
+        pts3d_ref: Optional (H, W, 3) array of 3D points for reference image
+        min_height: Optional minimum Z-coordinate threshold for filtering
 
     Returns:
-        Index of nearest match
+        Index of nearest match and distance
     """
     query_array = np.array(query_point)
     distances = np.linalg.norm(matches_ref - query_array, axis=1)
+
+    # If height filtering is enabled, filter matches by Z-coordinate
+    if pts3d_ref is not None and min_height is not None:
+        # Get Z-coordinates for all matches
+        valid_mask = np.ones(len(matches_ref), dtype=bool)
+
+        for i, (x, y) in enumerate(matches_ref):
+            # Convert to integer indices for array lookup
+            x_idx = int(round(x))
+            y_idx = int(round(y))
+
+            # Check bounds
+            if 0 <= y_idx < pts3d_ref.shape[0] and 0 <= x_idx < pts3d_ref.shape[1]:
+                z_coord = pts3d_ref[y_idx, x_idx, 2]
+                if z_coord < min_height:
+                    valid_mask[i] = False
+            else:
+                valid_mask[i] = False
+
+        # Filter matches by height
+        if not np.any(valid_mask):
+            print(f"  WARNING: No matches above height threshold {min_height}. Using all matches.")
+        else:
+            n_filtered = np.sum(~valid_mask)
+            print(f"  Filtered {n_filtered} matches below height threshold {min_height}")
+            distances[~valid_mask] = np.inf
+
     nearest_idx = np.argmin(distances)
     return nearest_idx, distances[nearest_idx]
 
@@ -235,6 +264,8 @@ def main():
                        help='Directory containing sample images')
     parser.add_argument('--point', type=str, default=None,
                        help='Query point coordinates as "x,y" (e.g., "1500,2000"). If not provided, will attempt interactive selection.')
+    parser.add_argument('--min-height', type=float, default=None,
+                       help='Minimum relative height (Z-coordinate) for filtering matches. Use this to prefer elevated points (e.g., power lines) over ground points.')
     parser.add_argument('--no-display', action='store_true',
                        help='Do not display visualizations interactively, only save to disk')
     args = parser.parse_args()
@@ -373,6 +404,15 @@ def main():
         desc1 = pred1['desc'].squeeze(0).detach()
         desc2 = pred2['desc'].squeeze(0).detach()
 
+        # Extract 3D points if height filtering is enabled
+        pts3d_ref = None
+        if args.min_height is not None:
+            # Get predicted 3D points for reference image
+            pts3d_ref = pred1['pts3d'].squeeze(0).detach().cpu().numpy()  # Shape: (H, W, 3)
+            print(f"  3D points shape: {pts3d_ref.shape}")
+            z_min, z_max = pts3d_ref[:, :, 2].min(), pts3d_ref[:, :, 2].max()
+            print(f"  Height range: {z_min:.2f} to {z_max:.2f}")
+
         # Find matches using reciprocal nearest neighbors
         print("  Finding matches...")
         matches_im0, matches_im1 = fast_reciprocal_NNs(
@@ -396,7 +436,12 @@ def main():
             continue
 
         # Find nearest match to query point (using inference resolution coordinates)
-        nearest_idx, distance = find_nearest_match(query_point_inference, matches_im0)
+        # Optionally filter by height if min_height is specified
+        nearest_idx, distance = find_nearest_match(
+            query_point_inference, matches_im0,
+            pts3d_ref=pts3d_ref,
+            min_height=args.min_height
+        )
         print(f"  Nearest match distance: {distance:.2f} pixels (at inference resolution)")
 
         matched_point = matches_im1[nearest_idx]
