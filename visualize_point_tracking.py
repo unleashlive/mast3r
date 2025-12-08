@@ -81,15 +81,20 @@ def select_point_interactively(image_path):
     return (float(x), float(y))
 
 
-def find_nearest_match(query_point, matches_ref, pts3d_ref=None, min_height=None):
+def find_nearest_match(query_point, matches_ref, matches_target,
+                       pts3d_ref=None, pts3d_target=None,
+                       min_height=None, max_height=None):
     """
     Find the index of the match nearest to the query point.
 
     Args:
         query_point: (x, y) tuple of query point coordinates
         matches_ref: (N, 2) array of match coordinates in reference image
+        matches_target: (N, 2) array of match coordinates in target image
         pts3d_ref: Optional (H, W, 3) array of 3D points for reference image
+        pts3d_target: Optional (H, W, 3) array of 3D points for target image
         min_height: Optional minimum Z-coordinate threshold for filtering
+        max_height: Optional maximum Z-coordinate threshold for filtering
 
     Returns:
         Index of nearest match and distance
@@ -98,29 +103,51 @@ def find_nearest_match(query_point, matches_ref, pts3d_ref=None, min_height=None
     distances = np.linalg.norm(matches_ref - query_array, axis=1)
 
     # If height filtering is enabled, filter matches by Z-coordinate
-    if pts3d_ref is not None and min_height is not None:
-        # Get Z-coordinates for all matches
+    if (pts3d_ref is not None or pts3d_target is not None) and (min_height is not None or max_height is not None):
         valid_mask = np.ones(len(matches_ref), dtype=bool)
+        filtered_by_ref = 0
+        filtered_by_target = 0
 
-        for i, (x, y) in enumerate(matches_ref):
-            # Convert to integer indices for array lookup
-            x_idx = int(round(x))
-            y_idx = int(round(y))
+        for i in range(len(matches_ref)):
+            # Check reference image height
+            if pts3d_ref is not None:
+                x_idx = int(round(matches_ref[i, 0]))
+                y_idx = int(round(matches_ref[i, 1]))
 
-            # Check bounds
-            if 0 <= y_idx < pts3d_ref.shape[0] and 0 <= x_idx < pts3d_ref.shape[1]:
-                z_coord = pts3d_ref[y_idx, x_idx, 2]
-                if z_coord < min_height:
-                    valid_mask[i] = False
-            else:
-                valid_mask[i] = False
+                if 0 <= y_idx < pts3d_ref.shape[0] and 0 <= x_idx < pts3d_ref.shape[1]:
+                    z_coord = pts3d_ref[y_idx, x_idx, 2]
+                    if min_height is not None and z_coord < min_height:
+                        valid_mask[i] = False
+                        filtered_by_ref += 1
+                        continue
+                    if max_height is not None and z_coord > max_height:
+                        valid_mask[i] = False
+                        filtered_by_ref += 1
+                        continue
+
+            # Check target image height
+            if pts3d_target is not None and valid_mask[i]:
+                x_idx = int(round(matches_target[i, 0]))
+                y_idx = int(round(matches_target[i, 1]))
+
+                if 0 <= y_idx < pts3d_target.shape[0] and 0 <= x_idx < pts3d_target.shape[1]:
+                    z_coord = pts3d_target[y_idx, x_idx, 2]
+                    if min_height is not None and z_coord < min_height:
+                        valid_mask[i] = False
+                        filtered_by_target += 1
+                        continue
+                    if max_height is not None and z_coord > max_height:
+                        valid_mask[i] = False
+                        filtered_by_target += 1
+                        continue
 
         # Filter matches by height
         if not np.any(valid_mask):
-            print(f"  WARNING: No matches above height threshold {min_height}. Using all matches.")
+            print(f"  WARNING: No matches in height range. Using all matches.")
         else:
             n_filtered = np.sum(~valid_mask)
-            print(f"  Filtered {n_filtered} matches below height threshold {min_height}")
+            if n_filtered > 0:
+                print(f"  Filtered {n_filtered} matches outside height range (ref: {filtered_by_ref}, target: {filtered_by_target})")
             distances[~valid_mask] = np.inf
 
     nearest_idx = np.argmin(distances)
@@ -266,6 +293,8 @@ def main():
                        help='Query point coordinates as "x,y" (e.g., "1500,2000"). If not provided, will attempt interactive selection.')
     parser.add_argument('--min-height', type=float, default=None,
                        help='Minimum relative height (Z-coordinate) for filtering matches. Use this to prefer elevated points (e.g., power lines) over ground points.')
+    parser.add_argument('--height-tolerance', type=float, default=0.5,
+                       help='Height tolerance around query point (default: 0.5). Only match points within this Z range of the query point height.')
     parser.add_argument('--no-display', action='store_true',
                        help='Do not display visualizations interactively, only save to disk')
     args = parser.parse_args()
@@ -404,14 +433,15 @@ def main():
         desc1 = pred1['desc'].squeeze(0).detach()
         desc2 = pred2['desc'].squeeze(0).detach()
 
-        # Extract 3D points if height filtering is enabled
-        pts3d_ref = None
-        if args.min_height is not None:
-            # Get predicted 3D points for reference image
-            pts3d_ref = pred1['pts3d'].squeeze(0).detach().cpu().numpy()  # Shape: (H, W, 3)
-            print(f"  3D points shape: {pts3d_ref.shape}")
-            z_min, z_max = pts3d_ref[:, :, 2].min(), pts3d_ref[:, :, 2].max()
-            print(f"  Height range: {z_min:.2f} to {z_max:.2f}")
+        # Always extract 3D points for height-based filtering
+        pts3d_ref = pred1['pts3d'].squeeze(0).detach().cpu().numpy()  # Shape: (H, W, 3)
+        # pred2 contains 'pts3d_in_other_view' which are target points in reference coordinate system
+        pts3d_target = pred2['pts3d_in_other_view'].squeeze(0).detach().cpu().numpy()  # Shape: (H, W, 3)
+        print(f"  3D points shape: {pts3d_ref.shape}")
+        z_min, z_max = pts3d_ref[:, :, 2].min(), pts3d_ref[:, :, 2].max()
+        print(f"  Reference height range: {z_min:.2f} to {z_max:.2f}")
+        z_min_target, z_max_target = pts3d_target[:, :, 2].min(), pts3d_target[:, :, 2].max()
+        print(f"  Target height range: {z_min_target:.2f} to {z_max_target:.2f}")
 
         # Find matches using reciprocal nearest neighbors
         print("  Finding matches...")
@@ -435,13 +465,48 @@ def main():
             print("  WARNING: No matches found for this pair!")
             continue
 
+        # Get the height of the query point itself for reference
+        query_z = None
+        qx, qy = int(round(query_point_inference[0])), int(round(query_point_inference[1]))
+        if 0 <= qy < pts3d_ref.shape[0] and 0 <= qx < pts3d_ref.shape[1]:
+            query_z = pts3d_ref[qy, qx, 2]
+            print(f"  Query point height (Z): {query_z:.2f}")
+
+        # Determine height threshold
+        height_threshold = None
+        if args.min_height is not None:
+            # Use absolute threshold if specified
+            height_threshold = args.min_height
+            print(f"  Using absolute height threshold: {height_threshold:.2f}")
+        elif query_z is not None and np.isfinite(query_z):
+            # Use relative threshold based on query point height
+            height_threshold = query_z - args.height_tolerance
+            print(f"  Using relative height threshold: {height_threshold:.2f} (query_z - {args.height_tolerance})")
+
         # Find nearest match to query point (using inference resolution coordinates)
-        # Optionally filter by height if min_height is specified
+        # Optionally filter by height in both reference and target images
+        print(f"  Calling find_nearest_match with height_threshold={height_threshold}")
         nearest_idx, distance = find_nearest_match(
-            query_point_inference, matches_im0,
+            query_point_inference, matches_im0, matches_im1,
             pts3d_ref=pts3d_ref,
-            min_height=args.min_height
+            pts3d_target=pts3d_target,
+            min_height=height_threshold
         )
+
+        # Get height of the matched point for debugging
+        matched_point_ref = matches_im0[nearest_idx]
+        matched_point_target = matches_im1[nearest_idx]
+        mx_ref, my_ref = int(round(matched_point_ref[0])), int(round(matched_point_ref[1]))
+        mx_target, my_target = int(round(matched_point_target[0])), int(round(matched_point_target[1]))
+
+        if 0 <= my_ref < pts3d_ref.shape[0] and 0 <= mx_ref < pts3d_ref.shape[1]:
+            matched_z_ref = pts3d_ref[my_ref, mx_ref, 2]
+            print(f"  Matched point height in ref: {matched_z_ref:.2f}")
+
+        if 0 <= my_target < pts3d_target.shape[0] and 0 <= mx_target < pts3d_target.shape[1]:
+            matched_z_target = pts3d_target[my_target, mx_target, 2]
+            print(f"  Matched point height in target: {matched_z_target:.2f}")
+
         print(f"  Nearest match distance: {distance:.2f} pixels (at inference resolution)")
 
         matched_point = matches_im1[nearest_idx]
