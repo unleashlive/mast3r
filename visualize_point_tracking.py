@@ -17,13 +17,12 @@ import glob
 import argparse
 import numpy as np
 import torch
+from PIL import Image
 
-# Set matplotlib backend before importing pyplot
+# Set non-interactive backend BEFORE importing pyplot
 import matplotlib
-# Use Agg backend for non-interactive use, will switch to interactive if needed
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-from PIL import Image
 
 # Add MASt3R paths
 import mast3r.utils.path_to_dust3r  # noqa
@@ -44,6 +43,20 @@ def select_point_interactively(image_path):
     Returns:
         (x, y): Selected point coordinates, or None if cancelled
     """
+    # Try to set an interactive backend
+    current_backend = matplotlib.get_backend()
+    if current_backend == 'agg' or current_backend == 'Agg':
+        # Try to switch to an interactive backend
+        for backend in ['QtAgg', 'Qt5Agg', 'TkAgg', 'GTK3Agg', 'WXAgg']:
+            try:
+                matplotlib.use(backend, force=True)
+                import importlib
+                importlib.reload(plt)
+                print(f"Switched to {backend} backend for interactive display")
+                break
+            except:
+                continue
+
     img = Image.open(image_path)
     img_array = np.array(img)
 
@@ -128,19 +141,22 @@ def sample_context_matches(matches_ref, matches_target, query_idx, n_context=19)
 
 
 def visualize_matches(ref_img_path, target_img_path, matches_ref, matches_target,
-                     is_query, query_point, output_path, target_idx, show_display=True):
+                     is_query, query_point, output_path, target_idx,
+                     target_scale_x=1.0, target_scale_y=1.0, show_display=True):
     """
     Create and save a visualization of matches between two images.
 
     Args:
         ref_img_path: Path to reference image
         target_img_path: Path to target image
-        matches_ref: (N, 2) array of match coordinates in reference image
-        matches_target: (N, 2) array of match coordinates in target image
+        matches_ref: (N, 2) array of match coordinates in reference image (at inference resolution)
+        matches_target: (N, 2) array of match coordinates in target image (at inference resolution)
         is_query: (N,) boolean array indicating which match is the query
-        query_point: Original query point coordinates
+        query_point: Original query point coordinates (at original resolution)
         output_path: Path to save visualization
         target_idx: Index of target image (for title)
+        target_scale_x: Scale factor from inference to original resolution for target image (x-axis)
+        target_scale_y: Scale factor from inference to original resolution for target image (y-axis)
         show_display: Whether to display the plot interactively
     """
     # Load images
@@ -167,42 +183,31 @@ def visualize_matches(ref_img_path, target_img_path, matches_ref, matches_target
     cmap = plt.get_cmap('jet')
     n_matches = len(matches_ref)
 
-    # Draw matches
-    for i in range(n_matches):
-        x0, y0 = matches_ref[i]
-        x1, y1 = matches_target[i]
+    # Draw only the query match
+    query_idx = np.where(is_query)[0][0]
+    # Use the original query point coordinates (not the matched point in ref image)
+    x0, y0 = query_point
 
-        if is_query[i]:
-            # Draw query match in red with thicker line
-            color = 'red'
-            linewidth = 3
-            markersize = 12
-            alpha = 1.0
-        else:
-            # Context matches in gradient colors
-            color = cmap(i / (n_matches - 1))
-            linewidth = 1.5
-            markersize = 8
-            alpha = 0.7
+    # Get matched point at inference resolution and scale to original resolution
+    # Scale factors are (inference / original), so to go back: original = inference / scale
+    matched_point_inference = matches_target[query_idx]
+    x1 = matched_point_inference[0] * (1.0 / target_scale_x)
+    y1 = matched_point_inference[1] * (1.0 / target_scale_y)
+    matched_point_original = (x1, y1)
 
-        # Draw line from ref image to target image
-        # Target image is offset by W0 horizontally
-        ax.plot([x0, x1 + W0], [y0, y1], '-+',
-                color=color, linewidth=linewidth, markersize=markersize,
-                alpha=alpha, scalex=False, scaley=False)
+    # Draw query match in red with thicker line
+    # Target image is offset by W0 horizontally
+    ax.plot([x0, x1 + W0], [y0, y1], '-o',
+            color='red', linewidth=3, markersize=12,
+            alpha=1.0, scalex=False, scaley=False)
 
     # Add query point marker in reference image
     ax.plot(query_point[0], query_point[1], 'r*', markersize=20,
             markeredgecolor='white', markeredgewidth=2)
 
-    # Find which match is the query
-    query_idx = np.where(is_query)[0][0]
-    matched_point = matches_target[query_idx]
-
     ax.set_title(f'Point Tracking: Reference → Image {target_idx}\n' +
                 f'Query Point: ({query_point[0]:.1f}, {query_point[1]:.1f}) → ' +
-                f'Matched Point: ({matched_point[0]:.1f}, {matched_point[1]:.1f})\n' +
-                f'Total Matches Shown: {n_matches}',
+                f'Matched Point: ({matched_point_original[0]:.1f}, {matched_point_original[1]:.1f})',
                 fontsize=14, pad=20)
     ax.axis('off')
 
@@ -303,6 +308,31 @@ def main():
     ref_images = load_images([ref_img_path], size=args.image_size)
     ref_img_data = ref_images[0]
 
+    # Get original reference image dimensions for coordinate transformation
+    ref_img_pil = Image.open(ref_img_path)
+    ref_original_width, ref_original_height = ref_img_pil.size
+
+    # Get inference resolution from the loaded image data
+    # Shape is (1, C, H, W) for the image tensor
+    _, _, ref_inference_height, ref_inference_width = ref_img_data['img'].shape
+
+    # Calculate scale factors
+    scale_x = ref_inference_width / ref_original_width
+    scale_y = ref_inference_height / ref_original_height
+
+    # Transform query point to inference resolution
+    query_point_inference = (
+        query_point[0] * scale_x,
+        query_point[1] * scale_y
+    )
+
+    print(f"\nCoordinate transformation:")
+    print(f"  Original image size: {ref_original_width}x{ref_original_height}")
+    print(f"  Inference resolution: {ref_inference_width}x{ref_inference_height}")
+    print(f"  Scale factors: ({scale_x:.4f}, {scale_y:.4f})")
+    print(f"  Query point (original): ({query_point[0]:.1f}, {query_point[1]:.1f})")
+    print(f"  Query point (inference): ({query_point_inference[0]:.1f}, {query_point_inference[1]:.1f})")
+
     # Track point across all other images
     print(f"\nTracking point across {len(image_files) - 1} target images...")
     print("=" * 80)
@@ -317,6 +347,18 @@ def main():
         # Load target image
         target_images = load_images([target_img_path], size=args.image_size)
         target_img_data = target_images[0]
+
+        # Get target image dimensions for coordinate transformation
+        target_img_pil = Image.open(target_img_path)
+        target_original_width, target_original_height = target_img_pil.size
+
+        # Get inference resolution from the loaded image data
+        # Shape is (1, C, H, W) for the image tensor
+        _, _, target_inference_height, target_inference_width = target_img_data['img'].shape
+
+        # Calculate scale factors for target image
+        target_scale_x = target_inference_width / target_original_width
+        target_scale_y = target_inference_height / target_original_height
 
         # Run MASt3R inference
         print("  Running inference...")
@@ -353,9 +395,9 @@ def main():
             print("  WARNING: No matches found for this pair!")
             continue
 
-        # Find nearest match to query point
-        nearest_idx, distance = find_nearest_match(query_point, matches_im0)
-        print(f"  Nearest match distance: {distance:.2f} pixels")
+        # Find nearest match to query point (using inference resolution coordinates)
+        nearest_idx, distance = find_nearest_match(query_point_inference, matches_im0)
+        print(f"  Nearest match distance: {distance:.2f} pixels (at inference resolution)")
 
         matched_point = matches_im1[nearest_idx]
         print(f"  Query point ({query_point[0]:.1f}, {query_point[1]:.1f}) → " +
@@ -375,6 +417,8 @@ def main():
             selected_ref, selected_target,
             is_query, query_point,
             output_path, target_idx + 1,
+            target_scale_x=target_scale_x,
+            target_scale_y=target_scale_y,
             show_display=not args.no_display
         )
 
@@ -391,8 +435,9 @@ def main():
     print("\n" + "=" * 80)
     print("SUMMARY")
     print("=" * 80)
-    print(f"Query point in reference image: ({query_point[0]:.1f}, {query_point[1]:.1f})")
-    print(f"\nMatched points in target images:")
+    print(f"Query point in reference image (original): ({query_point[0]:.1f}, {query_point[1]:.1f})")
+    print(f"Query point in reference image (inference): ({query_point_inference[0]:.1f}, {query_point_inference[1]:.1f})")
+    print(f"\nMatched points in target images (at inference resolution):")
     for result in results_summary:
         mp = result['matched_point']
         print(f"  Image {result['target_idx']} ({result['target_name']}): " +
