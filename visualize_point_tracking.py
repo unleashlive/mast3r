@@ -235,13 +235,14 @@ class InteractivePointTracker:
         if not self.current_point or not self.last_results:
             return
 
-        # Create a figure showing reference + all matches
+        # Create a figure showing reference + all matches (2 columns layout)
         n_targets = len(self.last_results)
-        fig = plt.figure(figsize=(20, 4 * ((n_targets + 2) // 3)))
-        gs = GridSpec(((n_targets + 2) // 3), 3, figure=fig, hspace=0.3, wspace=0.2)
+        n_rows = (n_targets + 1) // 2  # Calculate rows needed for 2 columns
+        fig = plt.figure(figsize=(40, 10 * n_rows))
+        gs = GridSpec(n_rows, 2, figure=fig, hspace=0.3, wspace=0.2)
 
         for i, result in enumerate(self.last_results):
-            ax = fig.add_subplot(gs[i // 3, i % 3])
+            ax = fig.add_subplot(gs[i // 2, i % 2])
 
             # Load images
             img_ref = self.ref_img
@@ -275,11 +276,23 @@ class InteractivePointTracker:
         plt.suptitle(f"Point Tracking Results: ({self.current_point[0]:.1f}, {self.current_point[1]:.1f})",
                     fontsize=14, fontweight='bold')
 
-        # Save to file
+        # Save to file with higher DPI for better quality at larger size
         output_path = os.path.join(self.output_dir, f'tracking_{int(time.time())}.png')
-        plt.savefig(output_path, dpi=100, bbox_inches='tight')
+        plt.savefig(output_path, dpi=150, bbox_inches='tight')
         print(f"\nSaved visualization: {output_path}")
         plt.close()
+
+        # Open in viewnior
+        import subprocess
+        try:
+            subprocess.Popen(['viewnior', output_path],
+                           stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL)
+            print(f"Opened in viewnior: {output_path}")
+        except FileNotFoundError:
+            print("viewnior not found. Install it with: sudo pacman -S viewnior")
+        except Exception as e:
+            print(f"Could not open in viewnior: {e}")
 
     def on_click(self, event):
         """Handle mouse click events."""
@@ -330,8 +343,8 @@ class InteractivePointTracker:
         print("="*60)
         print("Instructions:")
         print("  • Click on the reference image to track a point")
-        print("  • Results will be processed and displayed automatically")
-        print("  • Press 'q' or close window to exit")
+        print("  • Results will open in viewnior image viewer")
+        print("  • Press 'q' to exit the application")
         print("="*60 + "\n")
 
         # Create reference image window
