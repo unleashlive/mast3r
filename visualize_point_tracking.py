@@ -3,12 +3,15 @@
 Interactive Point Tracking Visualization for MASt3R
 
 This script allows you to:
-1. Click on a point in a reference image
-2. Track that point across all other images using MASt3R matching
-3. Visualize the matches with colored lines connecting corresponding points
+1. Click on points in a reference image interactively
+2. Track each point across all other images using MASt3R matching
+3. Visualize the matches in real-time with automatic updates
 
 Usage:
     python visualize_point_tracking.py [--device cuda|cpu] [--image_size 512]
+
+    Click on the reference image to probe points. Results appear automatically.
+    Press 'q' or close the window to exit.
 """
 
 import os
@@ -18,11 +21,37 @@ import argparse
 import numpy as np
 import torch
 from PIL import Image
+import threading
+import queue
+import time
 
-# Set non-interactive backend BEFORE importing pyplot
+# Prevent Qt/OpenCV conflicts
+os.environ['QT_QPA_PLATFORM_PLUGIN_PATH'] = ''
+
+# Set interactive backend for matplotlib
 import matplotlib
-matplotlib.use('Agg')
+# Try to use an interactive backend (prefer TkAgg to avoid Qt/cv2 conflicts)
+_backend_loaded = False
+_backend_error = None
+for backend in ['TkAgg', 'GTK3Agg', 'WXAgg']:
+    try:
+        matplotlib.use(backend, force=True)
+        _backend_loaded = True
+        print(f"Using matplotlib backend: {backend}")
+        break
+    except Exception as e:
+        _backend_error = str(e)
+        continue
+
+if not _backend_loaded:
+    print(f"Warning: Could not load preferred interactive backends")
+    if _backend_error:
+        print(f"  Last error: {_backend_error}")
+    print("  Falling back to Agg (non-interactive) - visualizations will be saved but not displayed")
+    matplotlib.use('Agg')
+
 import matplotlib.pyplot as plt
+from matplotlib.gridspec import GridSpec
 
 # Add MASt3R paths
 import mast3r.utils.path_to_dust3r  # noqa
@@ -33,52 +62,299 @@ from dust3r.inference import inference
 from dust3r.utils.image import load_images
 
 
-def select_point_interactively(image_path):
-    """
-    Display an image and allow user to click to select a point.
+class InteractivePointTracker:
+    """Interactive point tracking system with continuous click support."""
 
-    Args:
-        image_path: Path to the image file
+    def __init__(self, model, device, image_files, image_size, args):
+        self.model = model
+        self.device = device
+        self.image_files = image_files
+        self.image_size = image_size
+        self.args = args
 
-    Returns:
-        (x, y): Selected point coordinates, or None if cancelled
-    """
-    # Try to set an interactive backend
-    current_backend = matplotlib.get_backend()
-    if current_backend == 'agg' or current_backend == 'Agg':
-        # Try to switch to an interactive backend
-        for backend in ['QtAgg', 'Qt5Agg', 'TkAgg', 'GTK3Agg', 'WXAgg']:
+        self.ref_img_path = image_files[0]
+        self.ref_img = np.array(Image.open(self.ref_img_path))
+
+        # Load and cache reference image data
+        print("Loading reference image for inference...")
+        ref_images = load_images([self.ref_img_path], size=image_size)
+        self.ref_img_data = ref_images[0]
+
+        # Get coordinate transformation parameters
+        ref_img_pil = Image.open(self.ref_img_path)
+        ref_original_width, ref_original_height = ref_img_pil.size
+        _, _, ref_inference_height, ref_inference_width = self.ref_img_data['img'].shape
+
+        self.scale_x = ref_inference_width / ref_original_width
+        self.scale_y = ref_inference_height / ref_original_height
+
+        print(f"Coordinate transform: {ref_original_width}x{ref_original_height} → "
+              f"{ref_inference_width}x{ref_inference_height} "
+              f"(scale: {self.scale_x:.4f}, {self.scale_y:.4f})")
+
+        # Processing queue and state
+        self.point_queue = queue.Queue()
+        self.processing = False
+        self.should_exit = False
+        self.current_point = None
+        self.last_results = []
+
+        # Create output directory
+        self.output_dir = os.path.join(os.path.dirname(self.ref_img_path), 'matches')
+        os.makedirs(self.output_dir, exist_ok=True)
+
+        # Start processing thread
+        self.processor_thread = threading.Thread(target=self._process_points, daemon=True)
+        self.processor_thread.start()
+
+    def _process_points(self):
+        """Background thread to process point tracking requests."""
+        while not self.should_exit:
             try:
-                matplotlib.use(backend, force=True)
-                import importlib
-                importlib.reload(plt)
-                print(f"Switched to {backend} backend for interactive display")
-                break
-            except:
-                continue
+                # Get next point from queue (with timeout to check should_exit)
+                try:
+                    query_point = self.point_queue.get(timeout=0.1)
+                except queue.Empty:
+                    continue
 
-    img = Image.open(image_path)
-    img_array = np.array(img)
+                self.processing = True
+                self.current_point = query_point
 
-    fig, ax = plt.subplots(figsize=(12, 8))
-    ax.imshow(img_array)
-    ax.set_title('Click on a point to track across images\n(Close window to use clicked point)')
-    ax.axis('off')
+                print(f"\n{'='*60}")
+                print(f"Processing point: ({query_point[0]:.1f}, {query_point[1]:.1f})")
+                print(f"{'='*60}")
 
-    print("\nPlease click on a point in the image...")
-    print("Close the window when done.")
+                # Transform to inference coordinates
+                query_point_inference = (
+                    query_point[0] * self.scale_x,
+                    query_point[1] * self.scale_y
+                )
 
-    points = plt.ginput(n=1, timeout=0)
-    plt.close()
+                results = []
 
-    if not points:
-        print("No point selected!")
-        return None
+                # Track across all target images
+                for target_idx in range(1, len(self.image_files)):
+                    target_img_path = self.image_files[target_idx]
+                    print(f"\nImage {target_idx}/{len(self.image_files)-1}: {os.path.basename(target_img_path)}")
 
-    x, y = points[0]
-    print(f"Selected point: ({x:.1f}, {y:.1f})")
+                    # Load target image
+                    target_images = load_images([target_img_path], size=self.image_size)
+                    target_img_data = target_images[0]
 
-    return (float(x), float(y))
+                    # Get target dimensions
+                    target_img_pil = Image.open(target_img_path)
+                    target_original_width, target_original_height = target_img_pil.size
+                    _, _, target_inference_height, target_inference_width = target_img_data['img'].shape
+
+                    target_scale_x = target_inference_width / target_original_width
+                    target_scale_y = target_inference_height / target_original_height
+
+                    # Run inference
+                    with torch.no_grad():
+                        output = inference([(self.ref_img_data, target_img_data)], self.model,
+                                         self.device, batch_size=1, verbose=False)
+
+                    # Extract descriptors and 3D points
+                    pred1, pred2 = output['pred1'], output['pred2']
+                    desc1 = pred1['desc'].squeeze(0).detach()
+                    desc2 = pred2['desc'].squeeze(0).detach()
+
+                    pts3d_ref = pred1['pts3d'].squeeze(0).detach().cpu().numpy()
+                    pts3d_target = pred2['pts3d_in_other_view'].squeeze(0).detach().cpu().numpy()
+
+                    # Find matches
+                    matches_im0, matches_im1 = fast_reciprocal_NNs(
+                        desc1, desc2,
+                        subsample_or_initxy1=8,
+                        device=self.device,
+                        dist='dot',
+                        block_size=2**13
+                    )
+
+                    if isinstance(matches_im0, torch.Tensor):
+                        matches_im0 = matches_im0.cpu().numpy()
+                    if isinstance(matches_im1, torch.Tensor):
+                        matches_im1 = matches_im1.cpu().numpy()
+
+                    if len(matches_im0) == 0:
+                        print("  No matches found!")
+                        continue
+
+                    # Get query point height for filtering
+                    query_z = None
+                    qx, qy = int(round(query_point_inference[0])), int(round(query_point_inference[1]))
+                    if 0 <= qy < pts3d_ref.shape[0] and 0 <= qx < pts3d_ref.shape[1]:
+                        query_z = pts3d_ref[qy, qx, 2]
+
+                    # Determine height threshold
+                    height_threshold = None
+                    if self.args.min_height is not None:
+                        height_threshold = self.args.min_height
+                    elif query_z is not None and np.isfinite(query_z):
+                        height_threshold = query_z - self.args.height_tolerance
+
+                    # Find nearest match
+                    nearest_idx, distance = find_nearest_match(
+                        query_point_inference, matches_im0, matches_im1,
+                        pts3d_ref=pts3d_ref,
+                        pts3d_target=pts3d_target,
+                        min_height=height_threshold
+                    )
+
+                    matched_point = matches_im1[nearest_idx]
+
+                    # Scale matched point to original coordinates
+                    matched_x = matched_point[0] / target_scale_x
+                    matched_y = matched_point[1] / target_scale_y
+
+                    print(f"  Match: ({matched_x:.1f}, {matched_y:.1f}) | Distance: {distance:.2f}px")
+
+                    results.append({
+                        'target_idx': target_idx,
+                        'target_path': target_img_path,
+                        'matched_point': (matched_x, matched_y),
+                        'distance': distance,
+                        'scale_x': target_scale_x,
+                        'scale_y': target_scale_y
+                    })
+
+                self.last_results = results
+                self.processing = False
+
+                # Update visualization
+                self._update_visualization()
+
+            except Exception as e:
+                print(f"Error processing point: {e}")
+                import traceback
+                traceback.print_exc()
+                self.processing = False
+
+    def _update_visualization(self):
+        """Update the visualization with current results."""
+        if not self.current_point or not self.last_results:
+            return
+
+        # Create a figure showing reference + all matches
+        n_targets = len(self.last_results)
+        fig = plt.figure(figsize=(20, 4 * ((n_targets + 2) // 3)))
+        gs = GridSpec(((n_targets + 2) // 3), 3, figure=fig, hspace=0.3, wspace=0.2)
+
+        for i, result in enumerate(self.last_results):
+            ax = fig.add_subplot(gs[i // 3, i % 3])
+
+            # Load images
+            img_ref = self.ref_img
+            img_target = np.array(Image.open(result['target_path']))
+
+            # Pad to same height
+            H0, W0 = img_ref.shape[:2]
+            H1, W1 = img_target.shape[:2]
+
+            img_ref_pad = np.pad(img_ref, ((0, max(H1 - H0, 0)), (0, 0), (0, 0)),
+                                'constant', constant_values=0)
+            img_target_pad = np.pad(img_target, ((0, max(H0 - H1, 0)), (0, 0), (0, 0)),
+                                   'constant', constant_values=0)
+
+            img_combined = np.concatenate((img_ref_pad, img_target_pad), axis=1)
+
+            ax.imshow(img_combined)
+
+            # Draw match
+            x0, y0 = self.current_point
+            x1, y1 = result['matched_point']
+
+            ax.plot([x0, x1 + W0], [y0, y1], '-o',
+                   color='red', linewidth=2, markersize=8, alpha=0.8)
+            ax.plot(x0, y0, 'r*', markersize=15, markeredgecolor='white', markeredgewidth=1.5)
+
+            ax.set_title(f"Image {result['target_idx']}: ({x1:.0f}, {y1:.0f}) | "
+                        f"dist: {result['distance']:.1f}px", fontsize=10)
+            ax.axis('off')
+
+        plt.suptitle(f"Point Tracking Results: ({self.current_point[0]:.1f}, {self.current_point[1]:.1f})",
+                    fontsize=14, fontweight='bold')
+
+        # Save to file
+        output_path = os.path.join(self.output_dir, f'tracking_{int(time.time())}.png')
+        plt.savefig(output_path, dpi=100, bbox_inches='tight')
+        print(f"\nSaved visualization: {output_path}")
+        plt.close()
+
+    def on_click(self, event):
+        """Handle mouse click events."""
+        if event.inaxes and event.button == 1:  # Left click
+            x, y = event.xdata, event.ydata
+            if x is not None and y is not None:
+                print(f"\n→ Clicked: ({x:.1f}, {y:.1f})")
+                self.point_queue.put((x, y))
+
+                # Update reference image to show clicked point
+                if hasattr(self, 'ref_point_marker'):
+                    self.ref_point_marker.set_data([x], [y])
+                else:
+                    self.ref_point_marker, = self.ref_ax.plot(x, y, 'r*',
+                                                               markersize=15,
+                                                               markeredgecolor='white',
+                                                               markeredgewidth=2)
+                self.ref_fig.canvas.draw_idle()
+
+    def on_key(self, event):
+        """Handle keyboard events."""
+        if event.key == 'q':
+            print("\nExiting...")
+            self.should_exit = True
+            plt.close('all')
+
+    def run(self):
+        """Run the interactive visualization."""
+        backend = matplotlib.get_backend()
+
+        # Check if we have an interactive backend
+        if backend.lower() == 'agg':
+            print("\n" + "="*60)
+            print("ERROR: Interactive mode not available")
+            print("="*60)
+            print("No interactive matplotlib backend could be loaded.")
+            print("\nTo fix this, install one of the following:")
+            print("  - TkAgg: pip install tk")
+            print("  - GTK3Agg: pip install pygobject")
+            print("  - WXAgg: pip install wxPython")
+            print("\nAlternatively, you can use the non-interactive script:")
+            print("  python visualize_point_tracking.py --point x,y")
+            print("="*60)
+            return
+
+        print("\n" + "="*60)
+        print("INTERACTIVE POINT TRACKING")
+        print("="*60)
+        print("Instructions:")
+        print("  • Click on the reference image to track a point")
+        print("  • Results will be processed and displayed automatically")
+        print("  • Press 'q' or close window to exit")
+        print("="*60 + "\n")
+
+        # Create reference image window
+        try:
+            self.ref_fig, self.ref_ax = plt.subplots(figsize=(12, 8))
+            self.ref_ax.imshow(self.ref_img)
+            self.ref_ax.set_title('Reference Image - Click to Track Points\n(Press "q" to exit)',
+                                 fontsize=14, fontweight='bold')
+            self.ref_ax.axis('off')
+
+            # Connect event handlers
+            self.ref_fig.canvas.mpl_connect('button_press_event', self.on_click)
+            self.ref_fig.canvas.mpl_connect('key_press_event', self.on_key)
+
+            plt.show()
+        except Exception as e:
+            print(f"\nError displaying interactive window: {e}")
+            print("The interactive mode requires a display server (X11, Wayland, etc.)")
+        finally:
+            # Wait for processing to finish
+            self.should_exit = True
+            if self.processor_thread.is_alive():
+                self.processor_thread.join(timeout=2.0)
 
 
 def find_nearest_match(query_point, matches_ref, matches_target,
@@ -154,134 +430,8 @@ def find_nearest_match(query_point, matches_ref, matches_target,
     return nearest_idx, distances[nearest_idx]
 
 
-def sample_context_matches(matches_ref, matches_target, query_idx, n_context=19):
-    """
-    Sample additional context matches around the query match.
-
-    Args:
-        matches_ref: (N, 2) array of matches in reference image
-        matches_target: (N, 2) array of matches in target image
-        query_idx: Index of the query match
-        n_context: Number of additional context matches to include
-
-    Returns:
-        Tuple of (selected_ref_matches, selected_target_matches, is_query_mask)
-    """
-    n_total = len(matches_ref)
-
-    if n_total <= n_context + 1:
-        # Include all matches
-        is_query = np.zeros(n_total, dtype=bool)
-        is_query[query_idx] = True
-        return matches_ref, matches_target, is_query
-
-    # Sample context matches
-    # Strategy: sample evenly across all matches
-    all_indices = np.arange(n_total)
-    other_indices = np.delete(all_indices, query_idx)
-
-    # Sample evenly spaced indices
-    step = len(other_indices) // n_context
-    if step < 1:
-        step = 1
-    sampled_indices = other_indices[::step][:n_context]
-
-    # Combine query and context
-    selected_indices = np.concatenate([[query_idx], sampled_indices])
-    selected_indices = np.sort(selected_indices)
-
-    is_query = np.zeros(len(selected_indices), dtype=bool)
-    is_query[np.where(selected_indices == query_idx)[0][0]] = True
-
-    return matches_ref[selected_indices], matches_target[selected_indices], is_query
-
-
-def visualize_matches(ref_img_path, target_img_path, matches_ref, matches_target,
-                     is_query, query_point, output_path, target_idx,
-                     target_scale_x=1.0, target_scale_y=1.0, show_display=True):
-    """
-    Create and save a visualization of matches between two images.
-
-    Args:
-        ref_img_path: Path to reference image
-        target_img_path: Path to target image
-        matches_ref: (N, 2) array of match coordinates in reference image (at inference resolution)
-        matches_target: (N, 2) array of match coordinates in target image (at inference resolution)
-        is_query: (N,) boolean array indicating which match is the query
-        query_point: Original query point coordinates (at original resolution)
-        output_path: Path to save visualization
-        target_idx: Index of target image (for title)
-        target_scale_x: Scale factor from inference to original resolution for target image (x-axis)
-        target_scale_y: Scale factor from inference to original resolution for target image (y-axis)
-        show_display: Whether to display the plot interactively
-    """
-    # Load images
-    img_ref = np.array(Image.open(ref_img_path))
-    img_target = np.array(Image.open(target_img_path))
-
-    # Pad images to same height
-    H0, W0 = img_ref.shape[:2]
-    H1, W1 = img_target.shape[:2]
-
-    img_ref_pad = np.pad(img_ref, ((0, max(H1 - H0, 0)), (0, 0), (0, 0)),
-                         'constant', constant_values=0)
-    img_target_pad = np.pad(img_target, ((0, max(H0 - H1, 0)), (0, 0), (0, 0)),
-                            'constant', constant_values=0)
-
-    # Concatenate side-by-side
-    img_combined = np.concatenate((img_ref_pad, img_target_pad), axis=1)
-
-    # Create visualization
-    fig, ax = plt.subplots(figsize=(20, 10))
-    ax.imshow(img_combined)
-
-    # Get colormap
-    cmap = plt.get_cmap('jet')
-    n_matches = len(matches_ref)
-
-    # Draw only the query match
-    query_idx = np.where(is_query)[0][0]
-    # Use the original query point coordinates (not the matched point in ref image)
-    x0, y0 = query_point
-
-    # Get matched point at inference resolution and scale to original resolution
-    # Scale factors are (inference / original), so to go back: original = inference / scale
-    matched_point_inference = matches_target[query_idx]
-    x1 = matched_point_inference[0] * (1.0 / target_scale_x)
-    y1 = matched_point_inference[1] * (1.0 / target_scale_y)
-    matched_point_original = (x1, y1)
-
-    # Draw query match in red with thicker line
-    # Target image is offset by W0 horizontally
-    ax.plot([x0, x1 + W0], [y0, y1], '-o',
-            color='red', linewidth=3, markersize=12,
-            alpha=1.0, scalex=False, scaley=False)
-
-    # Add query point marker in reference image
-    ax.plot(query_point[0], query_point[1], 'r*', markersize=20,
-            markeredgecolor='white', markeredgewidth=2)
-
-    ax.set_title(f'Point Tracking: Reference → Image {target_idx}\n' +
-                f'Query Point: ({query_point[0]:.1f}, {query_point[1]:.1f}) → ' +
-                f'Matched Point: ({matched_point_original[0]:.1f}, {matched_point_original[1]:.1f})',
-                fontsize=14, pad=20)
-    ax.axis('off')
-
-    plt.tight_layout()
-    plt.savefig(output_path, dpi=150, bbox_inches='tight')
-    print(f"Saved visualization to: {output_path}")
-
-    # Display interactively if requested
-    if show_display:
-        try:
-            plt.show()
-        except:
-            pass  # Ignore display errors
-    plt.close()
-
-
 def main():
-    parser = argparse.ArgumentParser(description='Track a point across multiple images using MASt3R')
+    parser = argparse.ArgumentParser(description='Interactive point tracking across multiple images using MASt3R')
     parser.add_argument('--device', type=str, default='cuda', choices=['cuda', 'cpu'],
                        help='Device to use for inference')
     parser.add_argument('--image_size', type=int, default=512,
@@ -289,14 +439,10 @@ def main():
     parser.add_argument('--samples_dir', type=str,
                        default='/home/mordka/UNLEASH/work/mast3r/samples',
                        help='Directory containing sample images')
-    parser.add_argument('--point', type=str, default=None,
-                       help='Query point coordinates as "x,y" (e.g., "1500,2000"). If not provided, will attempt interactive selection.')
     parser.add_argument('--min-height', type=float, default=None,
                        help='Minimum relative height (Z-coordinate) for filtering matches. Use this to prefer elevated points (e.g., power lines) over ground points.')
     parser.add_argument('--height-tolerance', type=float, default=0.5,
                        help='Height tolerance around query point (default: 0.5). Only match points within this Z range of the query point height.')
-    parser.add_argument('--no-display', action='store_true',
-                       help='Do not display visualizations interactively, only save to disk')
     args = parser.parse_args()
 
     # Check device availability
@@ -331,232 +477,17 @@ def main():
     model.eval()
     print("Model loaded successfully!")
 
-    # Select reference image (first image)
-    ref_img_path = image_files[0]
-    print(f"\nReference image: {os.path.basename(ref_img_path)}")
+    print(f"\nReference image: {os.path.basename(image_files[0])}")
 
-    # Get query point from command line or interactive selection
-    if args.point:
-        # Parse coordinates from command line
-        try:
-            x, y = map(float, args.point.split(','))
-            query_point = (x, y)
-            print(f"\nUsing query point from command line: ({x:.1f}, {y:.1f})")
-        except ValueError:
-            print(f"Error: Invalid point format '{args.point}'. Expected format: 'x,y' (e.g., '1500,2000')")
-            return 1
-    else:
-        # Interactive point selection
-        try:
-            query_point = select_point_interactively(ref_img_path)
-            if query_point is None:
-                print("Point selection cancelled.")
-                return 1
-        except Exception as e:
-            print(f"\nError with interactive selection: {e}")
-            print("\nTip: Use --point x,y to specify coordinates directly")
-            print("Example: python visualize_point_tracking.py --point 2000,1500")
-            return 1
-
-    # Create output directory
-    output_dir = os.path.join(args.samples_dir, 'matches')
-    os.makedirs(output_dir, exist_ok=True)
-    print(f"\nOutput directory: {output_dir}")
-
-    # Load reference image for inference
-    print("\nLoading reference image for inference...")
-    ref_images = load_images([ref_img_path], size=args.image_size)
-    ref_img_data = ref_images[0]
-
-    # Get original reference image dimensions for coordinate transformation
-    ref_img_pil = Image.open(ref_img_path)
-    ref_original_width, ref_original_height = ref_img_pil.size
-
-    # Get inference resolution from the loaded image data
-    # Shape is (1, C, H, W) for the image tensor
-    _, _, ref_inference_height, ref_inference_width = ref_img_data['img'].shape
-
-    # Calculate scale factors
-    scale_x = ref_inference_width / ref_original_width
-    scale_y = ref_inference_height / ref_original_height
-
-    # Transform query point to inference resolution
-    query_point_inference = (
-        query_point[0] * scale_x,
-        query_point[1] * scale_y
-    )
-
-    print(f"\nCoordinate transformation:")
-    print(f"  Original image size: {ref_original_width}x{ref_original_height}")
-    print(f"  Inference resolution: {ref_inference_width}x{ref_inference_height}")
-    print(f"  Scale factors: ({scale_x:.4f}, {scale_y:.4f})")
-    print(f"  Query point (original): ({query_point[0]:.1f}, {query_point[1]:.1f})")
-    print(f"  Query point (inference): ({query_point_inference[0]:.1f}, {query_point_inference[1]:.1f})")
-
-    # Track point across all other images
-    print(f"\nTracking point across {len(image_files) - 1} target images...")
-    print("=" * 80)
-
-    results_summary = []
-
-    for target_idx in range(1, len(image_files)):
-        target_img_path = image_files[target_idx]
-        print(f"\nProcessing pair: Reference → Image {target_idx + 1}")
-        print(f"Target: {os.path.basename(target_img_path)}")
-
-        # Load target image
-        target_images = load_images([target_img_path], size=args.image_size)
-        target_img_data = target_images[0]
-
-        # Get target image dimensions for coordinate transformation
-        target_img_pil = Image.open(target_img_path)
-        target_original_width, target_original_height = target_img_pil.size
-
-        # Get inference resolution from the loaded image data
-        # Shape is (1, C, H, W) for the image tensor
-        _, _, target_inference_height, target_inference_width = target_img_data['img'].shape
-
-        # Calculate scale factors for target image
-        target_scale_x = target_inference_width / target_original_width
-        target_scale_y = target_inference_height / target_original_height
-
-        # Run MASt3R inference
-        print("  Running inference...")
-        with torch.no_grad():
-            output = inference([(ref_img_data, target_img_data)], model,
-                             args.device, batch_size=1, verbose=False)
-
-        # Extract descriptors
-        view1, pred1 = output['view1'], output['pred1']
-        view2, pred2 = output['view2'], output['pred2']
-
-        desc1 = pred1['desc'].squeeze(0).detach()
-        desc2 = pred2['desc'].squeeze(0).detach()
-
-        # Always extract 3D points for height-based filtering
-        pts3d_ref = pred1['pts3d'].squeeze(0).detach().cpu().numpy()  # Shape: (H, W, 3)
-        # pred2 contains 'pts3d_in_other_view' which are target points in reference coordinate system
-        pts3d_target = pred2['pts3d_in_other_view'].squeeze(0).detach().cpu().numpy()  # Shape: (H, W, 3)
-        print(f"  3D points shape: {pts3d_ref.shape}")
-        z_min, z_max = pts3d_ref[:, :, 2].min(), pts3d_ref[:, :, 2].max()
-        print(f"  Reference height range: {z_min:.2f} to {z_max:.2f}")
-        z_min_target, z_max_target = pts3d_target[:, :, 2].min(), pts3d_target[:, :, 2].max()
-        print(f"  Target height range: {z_min_target:.2f} to {z_max_target:.2f}")
-
-        # Find matches using reciprocal nearest neighbors
-        print("  Finding matches...")
-        matches_im0, matches_im1 = fast_reciprocal_NNs(
-            desc1, desc2,
-            subsample_or_initxy1=8,
-            device=args.device,
-            dist='dot',
-            block_size=2**13
-        )
-
-        # Convert to numpy if needed
-        if isinstance(matches_im0, torch.Tensor):
-            matches_im0 = matches_im0.cpu().numpy()
-        if isinstance(matches_im1, torch.Tensor):
-            matches_im1 = matches_im1.cpu().numpy()
-
-        print(f"  Found {len(matches_im0)} total matches")
-
-        if len(matches_im0) == 0:
-            print("  WARNING: No matches found for this pair!")
-            continue
-
-        # Get the height of the query point itself for reference
-        query_z = None
-        qx, qy = int(round(query_point_inference[0])), int(round(query_point_inference[1]))
-        if 0 <= qy < pts3d_ref.shape[0] and 0 <= qx < pts3d_ref.shape[1]:
-            query_z = pts3d_ref[qy, qx, 2]
-            print(f"  Query point height (Z): {query_z:.2f}")
-
-        # Determine height threshold
-        height_threshold = None
-        if args.min_height is not None:
-            # Use absolute threshold if specified
-            height_threshold = args.min_height
-            print(f"  Using absolute height threshold: {height_threshold:.2f}")
-        elif query_z is not None and np.isfinite(query_z):
-            # Use relative threshold based on query point height
-            height_threshold = query_z - args.height_tolerance
-            print(f"  Using relative height threshold: {height_threshold:.2f} (query_z - {args.height_tolerance})")
-
-        # Find nearest match to query point (using inference resolution coordinates)
-        # Optionally filter by height in both reference and target images
-        print(f"  Calling find_nearest_match with height_threshold={height_threshold}")
-        nearest_idx, distance = find_nearest_match(
-            query_point_inference, matches_im0, matches_im1,
-            pts3d_ref=pts3d_ref,
-            pts3d_target=pts3d_target,
-            min_height=height_threshold
-        )
-
-        # Get height of the matched point for debugging
-        matched_point_ref = matches_im0[nearest_idx]
-        matched_point_target = matches_im1[nearest_idx]
-        mx_ref, my_ref = int(round(matched_point_ref[0])), int(round(matched_point_ref[1]))
-        mx_target, my_target = int(round(matched_point_target[0])), int(round(matched_point_target[1]))
-
-        if 0 <= my_ref < pts3d_ref.shape[0] and 0 <= mx_ref < pts3d_ref.shape[1]:
-            matched_z_ref = pts3d_ref[my_ref, mx_ref, 2]
-            print(f"  Matched point height in ref: {matched_z_ref:.2f}")
-
-        if 0 <= my_target < pts3d_target.shape[0] and 0 <= mx_target < pts3d_target.shape[1]:
-            matched_z_target = pts3d_target[my_target, mx_target, 2]
-            print(f"  Matched point height in target: {matched_z_target:.2f}")
-
-        print(f"  Nearest match distance: {distance:.2f} pixels (at inference resolution)")
-
-        matched_point = matches_im1[nearest_idx]
-        print(f"  Query point ({query_point[0]:.1f}, {query_point[1]:.1f}) → " +
-              f"Matched point ({matched_point[0]:.1f}, {matched_point[1]:.1f})")
-
-        # Sample context matches
-        selected_ref, selected_target, is_query = sample_context_matches(
-            matches_im0, matches_im1, nearest_idx, n_context=19
-        )
-
-        print(f"  Visualizing {len(selected_ref)} matches (1 query + {len(selected_ref)-1} context)")
-
-        # Create visualization
-        output_path = os.path.join(output_dir, f'ref_to_img{target_idx + 1}.png')
-        visualize_matches(
-            ref_img_path, target_img_path,
-            selected_ref, selected_target,
-            is_query, query_point,
-            output_path, target_idx + 1,
-            target_scale_x=target_scale_x,
-            target_scale_y=target_scale_y,
-            show_display=not args.no_display
-        )
-
-        # Store results
-        results_summary.append({
-            'target_idx': target_idx + 1,
-            'target_name': os.path.basename(target_img_path),
-            'matched_point': matched_point,
-            'distance': distance,
-            'total_matches': len(matches_im0)
-        })
-
-    # Print summary
-    print("\n" + "=" * 80)
-    print("SUMMARY")
-    print("=" * 80)
-    print(f"Query point in reference image (original): ({query_point[0]:.1f}, {query_point[1]:.1f})")
-    print(f"Query point in reference image (inference): ({query_point_inference[0]:.1f}, {query_point_inference[1]:.1f})")
-    print(f"\nMatched points in target images (at inference resolution):")
-    for result in results_summary:
-        mp = result['matched_point']
-        print(f"  Image {result['target_idx']} ({result['target_name']}): " +
-              f"({mp[0]:.1f}, {mp[1]:.1f}) | " +
-              f"Distance: {result['distance']:.2f}px | " +
-              f"Total matches: {result['total_matches']}")
-
-    print(f"\nVisualizations saved to: {output_dir}")
-    print("=" * 80)
+    # Create and run interactive tracker
+    try:
+        tracker = InteractivePointTracker(model, args.device, image_files, args.image_size, args)
+        tracker.run()
+    except Exception as e:
+        print(f"\nError: {e}")
+        import traceback
+        traceback.print_exc()
+        return 1
 
     return 0
 
