@@ -576,6 +576,7 @@ class InteractivePointTracker:
         best_actual_distance = None
         best_bbox_idx = None
         best_bbox = None
+        best_bbox_distance = float('inf')  # Distance from match to bbox center (for tie-breaking)
         all_candidates = []  # Store all candidates for visualization
 
         for bbox_idx, bbox_display in enumerate(bbox_state['bboxes'], 1):
@@ -637,13 +638,27 @@ class InteractivePointTracker:
                 'height': match_z if match_z is not None and np.isfinite(match_z) else None
             })
 
-            # Keep track of the best match across all boxes (lowest score)
-            if score < best_distance:
+            # Calculate distance from matched point to bbox center (for tie-breaking)
+            bbox_center_x = (bbox_display[0] + bbox_display[2]) / 2
+            bbox_center_y = (bbox_display[1] + bbox_display[3]) / 2
+            dist_to_bbox_center = np.sqrt((matched_x - bbox_center_x)**2 + (matched_y - bbox_center_y)**2)
+
+            # Keep track of the best match across all boxes
+            # Prefer lower score, but if scores are equal (within 0.01), prefer bbox closest to match
+            score_tolerance = 0.01
+            is_better_score = score < (best_distance - score_tolerance)
+            is_tied_score = abs(score - best_distance) <= score_tolerance
+            is_closer_bbox = dist_to_bbox_center < best_bbox_distance
+
+            if is_better_score or (is_tied_score and is_closer_bbox):
                 best_distance = score
                 best_match = (matched_x, matched_y)
                 best_bbox_idx = bbox_idx
                 best_bbox = bbox_display
                 best_actual_distance = distance  # Store the actual 2D distance for display
+                best_bbox_distance = dist_to_bbox_center
+                if is_tied_score and is_closer_bbox:
+                    print(f"      → Tie-breaker: Selecting Box #{bbox_idx} (closer to match, dist to center: {dist_to_bbox_center:.1f}px)")
 
         # Create result for the single best match
         results = []
@@ -802,8 +817,10 @@ class InteractivePointTracker:
 
         n_in_bbox = np.sum(in_bbox)
         if n_in_bbox == 0:
-            print(f"  WARNING: No matches inside bbox! Using all {len(matches_target)} matches.")
-            return matches_ref, matches_target
+            print(f"  WARNING: No matches inside bbox! Skipping this box.")
+            # Return empty arrays instead of falling back to all matches
+            # This ensures bboxes only match points they actually contain
+            return np.array([]).reshape(0, 2), np.array([]).reshape(0, 2)
 
         print(f"  Filtered to {n_in_bbox}/{len(matches_target)} matches inside bbox")
         return matches_ref[in_bbox], matches_target[in_bbox]
