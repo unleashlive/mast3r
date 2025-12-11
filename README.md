@@ -77,10 +77,10 @@ Click on a reference image to track points across all other images interactively
 # Basic usage (opens interactive window)
 python visualize_point_tracking.py
 
-# With height filtering for elevated features (e.g., power lines)
+# With height filtering for elevated features (e.g., power lines) (WIP)
 python visualize_point_tracking.py --min-height 1.5
 
-# Custom height tolerance
+# Custom height tolerance (WIP)
 python visualize_point_tracking.py --height-tolerance 0.3
 ```
 
