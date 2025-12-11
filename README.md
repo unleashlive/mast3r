@@ -1,87 +1,26 @@
 ![banner](assets/mast3r.jpg)
 
-Official implementation of `Grounding Image Matching in 3D with MASt3R`  
-[[Project page](https://europe.naverlabs.com/blog/mast3r-matching-and-stereo-3d-reconstruction/)], [[MASt3R arxiv](https://arxiv.org/abs/2406.09756)], [[DUSt3R arxiv](https://arxiv.org/abs/2312.14132)]  
+# MASt3R - Point Tracking Experiments
 
-![Example of matching results obtained from MASt3R](assets/examples.jpg)
+Official implementation of `Grounding Image Matching in 3D with MASt3R`
+[[Project page](https://europe.naverlabs.com/blog/mast3r-matching-and-stereo-3d-reconstruction/)], [[MASt3R arxiv](https://arxiv.org/abs/2406.09756)], [[DUSt3R arxiv](https://arxiv.org/abs/2312.14132)]
 
-![High level overview of MASt3R's architecture](assets/mast3r_archi.jpg)
-
-```bibtex
-@misc{mast3r_eccv24,
-      title={Grounding Image Matching in 3D with MASt3R}, 
-      author={Vincent Leroy and Yohann Cabon and Jerome Revaud},
-      booktitle = {ECCV},
-      year = {2024}
-}
-
-@misc{mast3r_arxiv24,
-      title={Grounding Image Matching in 3D with MASt3R}, 
-      author={Vincent Leroy and Yohann Cabon and Jerome Revaud},
-      year={2024},
-      eprint={2406.09756},
-      archivePrefix={arXiv},
-      primaryClass={cs.CV}
-}
-
-@inproceedings{dust3r_cvpr24,
-      title={DUSt3R: Geometric 3D Vision Made Easy}, 
-      author={Shuzhe Wang and Vincent Leroy and Yohann Cabon and Boris Chidlovskii and Jerome Revaud},
-      booktitle = {CVPR},
-      year = {2024}
-}
-
-@inproceedings{
-    duisterhof2025mastrsfm,
-    title={{MAS}t3R-SfM: a Fully-Integrated Solution for Unconstrained Structure-from-Motion},
-    author={Bardienus Pieter Duisterhof and Lojze Zust and Philippe Weinzaepfel and Vincent Leroy and Yohann Cabon and Jerome Revaud},
-    booktitle={International Conference on 3D Vision 2025},
-    year={2025},
-    url={https://openreview.net/forum?id=5uw1GRBFoT}
-} 
-```
-
-## Table of Contents
-
-- [Table of Contents](#table-of-contents)
-- [License](#license)
-- [Get Started](#get-started)
-  - [Installation](#installation)
-  - [Checkpoints](#checkpoints)
-    - [MASt3R Model](#mast3r-model)
-    - [Retrieval Model](#retrieval-model)
-    - [Dune Model](#dune-model)
-  - [MASt3R-SfM](#mast3r-sfm)
-  - [Interactive demo](#interactive-demo)
-  - [Interactive demo with docker](#interactive-demo-with-docker)
-- [Usage](#usage)
-  - [Usage MASt3R](#usage-mast3r)
-  - [Usage DUNE+MASt3R](#usage-dunemast3r)
-- [Training](#training)
-  - [Datasets](#datasets)
-  - [Demo](#demo)
-  - [Our Hyperparameters](#our-hyperparameters)
-- [Visual Localization](#visual-localization)
-  - [Dataset preparation](#dataset-preparation)
-  - [Example Commands](#example-commands)
+This repository includes interactive point tracking tools for tracking points across multiple images using MASt3R.
 
 ## License
 
-The code is distributed under the CC BY-NC-SA 4.0 License.
-See [LICENSE](LICENSE) for more information.
+The code is distributed under the CC BY-NC-SA 4.0 License. See [LICENSE](LICENSE) for more information.
 
 ```python
 # Copyright (C) 2024-present Naver Corporation. All rights reserved.
 # Licensed under CC BY-NC-SA 4.0 (non-commercial use only).
 ```
 
-## Get Started
-
-### Installation
+## Installation
 
 1. Clone MASt3R.
 ```bash
-git clone --recursive https://github.com/naver/mast3r
+git clone --recursive https://github.com/unleashlive/mast3r
 cd mast3r
 # if you have already cloned mast3r:
 # git submodule update --init --recursive
@@ -90,8 +29,8 @@ cd mast3r
 2. Create the environment, here we show an example using conda.
 ```bash
 conda create -n mast3r python=3.11 cmake=3.14.0
-conda activate mast3r 
-conda install pytorch torchvision pytorch-cuda=12.1 -c pytorch -c nvidia  # use the correct version of cuda for your system
+conda activate mast3r
+conda install pytorch torchvision pytorch-cuda=12.4 -c pytorch -c nvidia  # use the correct version of cuda for your system
 pip install -r requirements.txt
 pip install -r dust3r/requirements.txt
 # Optional: you can also install additional packages to:
@@ -100,16 +39,14 @@ pip install -r dust3r/requirements.txt
 pip install -r dust3r/requirements_optional.txt
 ```
 
-3. compile and install ASMK
+3. Install additional dependencies for point tracking experiments.
 ```bash
-pip install cython
+# Python package
+pip install roma
 
-git clone https://github.com/jenicek/asmk
-cd asmk/cython/
-cythonize *.pyx
-cd ..
-pip install .  # or python3 setup.py build_ext --inplace
-cd ..
+# System package for image viewer (Arch)
+sudo pacman -S viewnior
+# Or for Ubuntu/Debian: sudo apt install viewnior
 ```
 
 4. Optional, compile the cuda kernels for RoPE (as in CroCo v2).
@@ -120,389 +57,141 @@ python setup.py build_ext --inplace
 cd ../../../../
 ```
 
-### Checkpoints
+## Quick Start - Point Tracking
 
-#### MASt3R Model
-You can obtain the model checkpoints by two ways:
+### Prepare Your Images
 
-1) You can use our huggingface_hub integration: the models will be downloaded automatically.
-
-2) Otherwise, download it from our server:
-
-| Modelname   | Training resolutions | Head | Encoder | Decoder |
-|-------------|----------------------|------|---------|---------|
-| [`MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric`](https://download.europe.naverlabs.com/ComputerVision/MASt3R/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric.pth) | 512x384, 512x336, 512x288, 512x256, 512x160 | CatMLP+DPT | ViT-L | ViT-B |
-
-You can check the hyperparameters we used to train these models in the [section: Our Hyperparameters](#our-hyperparameters)
-Make sure to check license of the datasets we used. 
-
-To download `MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric.pth`:
+Place your images in the `samples/` directory:
 ```bash
+mkdir -p samples
+# Copy your images to samples/
+# e.g., cp /path/to/images/*.jpg samples/
+```
+The reference image picked will be the first from the list sorted alphabetically.
+
+### 1. Interactive Point Tracking
+
+Click on a reference image to track points across all other images interactively.
+
+```bash
+# Basic usage (opens interactive window)
+python visualize_point_tracking.py
+
+# With height filtering for elevated features (e.g., power lines) (WIP)
+python visualize_point_tracking.py --min-height 1.5
+
+# Custom height tolerance (WIP)
+python visualize_point_tracking.py --height-tolerance 0.3
+```
+
+**How it works:**
+1. A window opens showing the first image (reference)
+2. Click anywhere on the image to track that point
+3. Processing starts automatically in the background
+4. Results open in viewnior image viewer showing matches across all images
+5. Click another point to track it
+6. Press 'q' to exit
+
+**Features:**
+- Interactive clicking interface
+- Automatic processing in background
+- Results displayed in 2-column layout (2x larger)
+- Opens automatically in viewnior
+- Height-based filtering for better matches
+- Results saved to `samples/matches/`
+
+**Options:**
+- `--device cuda|cpu` - Device for inference (default: cuda)
+- `--image_size SIZE` - Inference resolution (default: 512)
+- `--samples_dir PATH` - Directory with images (default: ./samples)
+- `--min-height VALUE` - Absolute height threshold for filtering
+- `--height-tolerance VALUE` - Relative height tolerance (default: 0.5)
+
+### 2. Global Point Tracking (Command Line)
+
+Track a single point from command line without interactive GUI.
+
+```bash
+# Track a specific point (x, y coordinates)
+python visualize_point_tracking_global.py --point 861,1215 --no-display
+
+# With height filtering
+python visualize_point_tracking_global.py --point 1500,2000 --min-height 1.5 --no-display
+```
+
+**Options:**
+- `--point X,Y` - Point coordinates to track (required)
+- `--no-display` - Don't show interactive display, only save files
+- `--device cuda|cpu` - Device for inference (default: cuda)
+- `--image_size SIZE` - Inference resolution (default: 512)
+- `--samples_dir PATH` - Directory with images (default: ./samples)
+- `--min-height VALUE` - Absolute height threshold for filtering
+- `--height-tolerance VALUE` - Relative height tolerance (default: 0.5)
+
+### Output
+
+All visualizations are saved to `samples/matches/` with timestamped filenames.
+
+Each visualization shows:
+- Reference image paired with each target image side-by-side
+- Red line connecting the query point to its match
+- Red star marking the query point
+- Coordinates and distance metrics
+
+## Requirements
+
+- Python 3.11+
+- PyTorch with CUDA support
+- viewnior image viewer (for interactive mode): `sudo pacman -S viewnior` (Arch/Manjaro)
+- Tkinter for GUI (interactive mode only)
+
+## Troubleshooting
+
+### Tkinter Issues
+
+If you see Tkinter errors:
+```bash
+# Upgrade uv (if using uv)
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Reinstall Python with Tkinter support
+uv python upgrade --reinstall
+
+# Recreate virtual environment
+./update_venv.sh
+```
+
+### Missing Dependencies
+
+```bash
+# If roma is missing
+pip install roma
+
+# If viewnior is missing
+sudo pacman -S viewnior  # Arch/Manjaro
+sudo apt install viewnior  # Ubuntu/Debian
+```
+
+### Model Not Found
+
+The model will be downloaded automatically on first run. If you have issues:
+```bash
+# Download manually
 mkdir -p checkpoints/
 wget https://download.europe.naverlabs.com/ComputerVision/MASt3R/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric.pth -P checkpoints/
 ```
 
-Make sure to agree to the license of all the training datasets we used, in addition to CC-BY-NC-SA 4.0. 
-The mapfree dataset license in particular is very restrictive. For more information, check [CHECKPOINTS_NOTICE](CHECKPOINTS_NOTICE).
-
-#### Retrieval Model
-This retrieval model is for `MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric` only.
-You need to download both the `trainingfree.pth` and `codebook.pkl` files, and put them in the same directory.
-
-[`MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric_retrieval_trainingfree`](https://download.europe.naverlabs.com/ComputerVision/MASt3R/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric_retrieval_trainingfree.pth)  
-[`MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric_retrieval_codebook`](https://download.europe.naverlabs.com/ComputerVision/MASt3R/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric_retrieval_codebook.pkl)  
-
-```bash
-mkdir -p checkpoints/
-wget https://download.europe.naverlabs.com/ComputerVision/MASt3R/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric_retrieval_trainingfree.pth -P checkpoints/
-wget https://download.europe.naverlabs.com/ComputerVision/MASt3R/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric_retrieval_codebook.pkl -P checkpoints/
-```
-
-#### Dune Model
-
-We added partial support of the [Dune](https://github.com/naver/dune) encoder. Check the associated [Dune License](https://github.com/naver/dune/blob/main/Project%20NLE%20DUNE%20LICENSE.txt).  
-You can find the MASt3R decoder that goes with it here:
-
-[`dunemast3r_cvpr25_vitbase`](https://download.europe.naverlabs.com/dune/dunemast3r_cvpr25_vitbase.pth)  
-[`dunemast3r_cvpr25_vitsmall`](https://download.europe.naverlabs.com/dune/dunemast3r_cvpr25_vitsmall.pth)  
-
-```bash
-mkdir -p checkpoints/
-wget https://download.europe.naverlabs.com/dune/dunemast3r_cvpr25_vitbase.pth -P checkpoints/
-```
-
-This model have limited compatility with the rest of the codebase, but we wanted to include it as it achieves impressive results on the Map-free Visual Relocalization benchmark.
-Make sure to check the [Usage DUNE+MASt3R](#usage-dune-mast3r) section if you are interested.
-
-### MASt3R-SfM
-
-A few words about the addition of MASt3R-SfM to this repository. 
-
-MASt3R-SfM refers to the make_pairs (retrieval) + sparse_global_alignment that you can find here: [demo.py#L142](mast3r/demo.py#L142). 
-
-In this repository, you will also find `kapture_mast3r_mapping.py` and `demo_glomap.py`. These two scripts are unrelated to MASt3R-SfM. They are "toys" that attempt to use mast3r matches to do standard Sfm reconstructions with colmap/glomap. As such, they were not extensively tested, and may fail on edge cases.
-
-### Interactive demo
-
-We made one huggingface space running the new sparse global alignment in a simplified demo for small scenes: [naver/MASt3R](https://huggingface.co/spaces/naver/MASt3R)
-There are two demos available to run locally:
-
-```
-demo.py is the updated demo for MASt3R. It uses our new sparse global alignment method that allows you to reconstruct larger scenes
-
-python3 demo.py --model_name MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric
-
-# Use --weights to load a checkpoint from a local file, eg --weights checkpoints/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric.pth
-# Use --retrieval_model and point to the retrieval checkpoint (*trainingfree.pth) to enable retrieval as a pairing strategy, asmk must be installed
-# Use --local_network to make it accessible on the local network, or --server_name to specify the url manually
-# Use --server_port to change the port, by default it will search for an available port starting at 7860
-# Use --device to use a different device, by default it's "cuda"
-
-demo_dust3r_ga.py is the same demo as in dust3r (+ compatibility for MASt3R models)
-see https://github.com/naver/dust3r?tab=readme-ov-file#interactive-demo for details
-```
-
-### Interactive demo with docker
-
-TODO update with asmk/retrieval model
-
-To run MASt3R using Docker, including with NVIDIA CUDA support, follow these instructions:
-
-1. **Install Docker**: If not already installed, download and install `docker` and `docker compose` from the [Docker website](https://www.docker.com/get-started).
-
-2. **Install NVIDIA Docker Toolkit**: For GPU support, install the NVIDIA Docker toolkit from the [Nvidia website](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html).
-
-3. **Build the Docker image and run it**: `cd` into the `./docker` directory and run the following commands: 
-
-```bash
-cd docker
-bash run.sh --with-cuda --model_name="MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric"
-```
-
-Or if you want to run the demo without CUDA support, run the following command:
-
-```bash 
-cd docker
-bash run.sh --model_name="MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric"
-```
-
-By default, `demo.py` is launched with the option `--local_network`.  
-Visit `http://localhost:7860/` to access the web UI (or replace `localhost` with the machine's name to access it from the network).  
-
-`run.sh` will launch docker-compose using either the [docker-compose-cuda.yml](docker/docker-compose-cuda.yml) or [docker-compose-cpu.ym](docker/docker-compose-cpu.yml) config file, then it starts the demo using [entrypoint.sh](docker/files/entrypoint.sh).
-
-___
-
-![demo](assets/demo.jpg)
-
-## Usage
-### Usage MASt3R
-
-<details>
-<summary>
-Code sample to compute matches with MASt3R for a pair of images
-</summary>
-
-```python
-from mast3r.model import AsymmetricMASt3R
-from mast3r.fast_nn import fast_reciprocal_NNs
-
-import mast3r.utils.path_to_dust3r
-from dust3r.inference import inference
-from dust3r.utils.image import load_images
-
-if __name__ == '__main__':
-    device = 'cuda'
-    model_name = "naver/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric"
-    # you can put the path to a local checkpoint in model_name if needed
-    model = AsymmetricMASt3R.from_pretrained(model_name).to(device)
-    images = load_images(['dust3r/croco/assets/Chateau1.png', 'dust3r/croco/assets/Chateau2.png'], size=512)
-    output = inference([tuple(images)], model, device, batch_size=1, verbose=False)
-
-    # at this stage, you have the raw dust3r predictions
-    view1, pred1 = output['view1'], output['pred1']
-    view2, pred2 = output['view2'], output['pred2']
-
-    desc1, desc2 = pred1['desc'].squeeze(0).detach(), pred2['desc'].squeeze(0).detach()
-
-    # find 2D-2D matches between the two images
-    matches_im0, matches_im1 = fast_reciprocal_NNs(desc1, desc2, subsample_or_initxy1=8,
-                                                   device=device, dist='dot', block_size=2**13)
-
-    # ignore small border around the edge
-    H0, W0 = view1['true_shape'][0]
-    valid_matches_im0 = (matches_im0[:, 0] >= 3) & (matches_im0[:, 0] < int(W0) - 3) & (
-        matches_im0[:, 1] >= 3) & (matches_im0[:, 1] < int(H0) - 3)
-
-    H1, W1 = view2['true_shape'][0]
-    valid_matches_im1 = (matches_im1[:, 0] >= 3) & (matches_im1[:, 0] < int(W1) - 3) & (
-        matches_im1[:, 1] >= 3) & (matches_im1[:, 1] < int(H1) - 3)
-
-    valid_matches = valid_matches_im0 & valid_matches_im1
-    matches_im0, matches_im1 = matches_im0[valid_matches], matches_im1[valid_matches]
-
-    # visualize a few matches
-    import numpy as np
-    import torch
-    import torchvision.transforms.functional
-    from matplotlib import pyplot as pl
-
-    n_viz = 20
-    num_matches = matches_im0.shape[0]
-    match_idx_to_viz = np.round(np.linspace(0, num_matches - 1, n_viz)).astype(int)
-    viz_matches_im0, viz_matches_im1 = matches_im0[match_idx_to_viz], matches_im1[match_idx_to_viz]
-
-    image_mean = torch.as_tensor([0.5, 0.5, 0.5], device='cpu').reshape(1, 3, 1, 1)
-    image_std = torch.as_tensor([0.5, 0.5, 0.5], device='cpu').reshape(1, 3, 1, 1)
-
-    viz_imgs = []
-    for i, view in enumerate([view1, view2]):
-        rgb_tensor = view['img'] * image_std + image_mean
-        viz_imgs.append(rgb_tensor.squeeze(0).permute(1, 2, 0).cpu().numpy())
-
-    H0, W0, H1, W1 = *viz_imgs[0].shape[:2], *viz_imgs[1].shape[:2]
-    img0 = np.pad(viz_imgs[0], ((0, max(H1 - H0, 0)), (0, 0), (0, 0)), 'constant', constant_values=0)
-    img1 = np.pad(viz_imgs[1], ((0, max(H0 - H1, 0)), (0, 0), (0, 0)), 'constant', constant_values=0)
-    img = np.concatenate((img0, img1), axis=1)
-    pl.figure()
-    pl.imshow(img)
-    cmap = pl.get_cmap('jet')
-    for i in range(n_viz):
-        (x0, y0), (x1, y1) = viz_matches_im0[i].T, viz_matches_im1[i].T
-        pl.plot([x0, x1 + W0], [y0, y1], '-+', color=cmap(i / (n_viz - 1)), scalex=False, scaley=False)
-    pl.show(block=True)
-```
-
-</details>
-
-![matching example on croco pair](assets/matching.jpg)
-
-### Usage DUNE+MASt3R
-
-At the moment, you can only do two things:
-
-1) Extract matches, following the subset of code below
-2) Run the `demo_dust3r_ga.py` script with option `--weights checkpoints/dunemast3r_cvpr25_vitbase.pth --image_size 518`
-
-<details>
-<summary>
-Code sample to compute matches with DUNE+MASt3R for a pair of images
-</summary>
-
-```python
-from mast3r.model import load_dune_mast3r_model
-from mast3r.fast_nn import fast_reciprocal_NNs
-
-import mast3r.utils.path_to_dust3r  # noqa
-from dust3r.utils.image import load_images
-from dust3r.inference import inference
-
-import torch
-
-if __name__ == '__main__':
-    device = torch.device('cuda:0')
-    model = load_dune_mast3r_model('checkpoints/dunemast3r_cvpr25_vitbase.pth', device)
-
-    images = load_images(['dust3r/croco/assets/Chateau1.png', 'dust3r/croco/assets/Chateau2.png'],
-                        size=518, patch_size=model.patch_size, square_ok=True)
-
-    output = inference([tuple(images)], model, device, batch_size=1, verbose=False)
-
-    # at this stage, you have the raw dust3r predictions
-    view1, pred1 = output['view1'], output['pred1']
-    view2, pred2 = output['view2'], output['pred2']
-
-    desc1, desc2 = pred1['desc'].squeeze(0).detach(), pred2['desc'].squeeze(0).detach()
-
-    # find 2D-2D matches between the two images
-    matches_im0, matches_im1 = fast_reciprocal_NNs(desc1, desc2, subsample_or_initxy1=8,
-                                                device=device, dist='dot', block_size=2**13)
-
-    # ignore small border around the edge
-    H0, W0 = view1['true_shape'][0]
-    valid_matches_im0 = (matches_im0[:, 0] >= 3) & (matches_im0[:, 0] < int(W0) - 3) & (
-        matches_im0[:, 1] >= 3) & (matches_im0[:, 1] < int(H0) - 3)
-
-    H1, W1 = view2['true_shape'][0]
-    valid_matches_im1 = (matches_im1[:, 0] >= 3) & (matches_im1[:, 0] < int(W1) - 3) & (
-        matches_im1[:, 1] >= 3) & (matches_im1[:, 1] < int(H1) - 3)
-
-    valid_matches = valid_matches_im0 & valid_matches_im1
-    matches_im0, matches_im1 = matches_im0[valid_matches], matches_im1[valid_matches]
-
-    # visualize a few matches
-    import numpy as np
-    import torch
-    import torchvision.transforms.functional
-    from matplotlib import pyplot as pl
-
-    n_viz = 20
-    num_matches = matches_im0.shape[0]
-    match_idx_to_viz = np.round(np.linspace(0, num_matches - 1, n_viz)).astype(int)
-    viz_matches_im0, viz_matches_im1 = matches_im0[match_idx_to_viz], matches_im1[match_idx_to_viz]
-
-    image_mean = torch.as_tensor([0.5, 0.5, 0.5], device='cpu').reshape(1, 3, 1, 1)
-    image_std = torch.as_tensor([0.5, 0.5, 0.5], device='cpu').reshape(1, 3, 1, 1)
-
-    viz_imgs = []
-    for i, view in enumerate([view1, view2]):
-        rgb_tensor = view['img'] * image_std + image_mean
-        viz_imgs.append(rgb_tensor.squeeze(0).permute(1, 2, 0).cpu().numpy())
-
-    H0, W0, H1, W1 = *viz_imgs[0].shape[:2], *viz_imgs[1].shape[:2]
-    img0 = np.pad(viz_imgs[0], ((0, max(H1 - H0, 0)), (0, 0), (0, 0)), 'constant', constant_values=0)
-    img1 = np.pad(viz_imgs[1], ((0, max(H0 - H1, 0)), (0, 0), (0, 0)), 'constant', constant_values=0)
-    img = np.concatenate((img0, img1), axis=1)
-    pl.figure()
-    pl.imshow(img)
-    cmap = pl.get_cmap('jet')
-    for i in range(n_viz):
-        (x0, y0), (x1, y1) = viz_matches_im0[i].T, viz_matches_im1[i].T
-        pl.plot([x0, x1 + W0], [y0, y1], '-+', color=cmap(i / (n_viz - 1)), scalex=False, scaley=False)
-    pl.show(block=True)
-
-```
-</details>
-
-## Training
-
-In this section, we present a short demonstration to get started with training MASt3R.
-
-### Datasets
-
-See [Datasets section in DUSt3R](https://github.com/naver/dust3r?tab=readme-ov-file#datasets)
-
-### Demo
-
-Like for the DUSt3R training demo, we're going to download and prepare the same subset of [CO3Dv2](https://github.com/facebookresearch/co3d) - [Creative Commons Attribution-NonCommercial 4.0 International](https://github.com/facebookresearch/co3d/blob/main/LICENSE) and launch the training code on it.
-It is the exact same process as DUSt3R.
-The demo model will be trained for a few epochs on a very small dataset.
-It will not be very good.
-
-```bash
-# download and prepare the co3d subset
-mkdir -p data/co3d_subset
-cd data/co3d_subset
-git clone https://github.com/facebookresearch/co3d
-cd co3d
-python3 ./co3d/download_dataset.py --download_folder ../ --single_sequence_subset
-rm ../*.zip
-cd ../../..
-
-python3 datasets_preprocess/preprocess_co3d.py --co3d_dir data/co3d_subset --output_dir data/co3d_subset_processed  --single_sequence_subset
-
-# download the pretrained dust3r checkpoint
-mkdir -p checkpoints/
-wget https://download.europe.naverlabs.com/ComputerVision/DUSt3R/DUSt3R_ViTLarge_BaseDecoder_512_dpt.pth -P checkpoints/
-
-# for this example we'll do fewer epochs, for the actual hyperparameters we used in the paper, see the next section: "Our Hyperparameters"
-torchrun --nproc_per_node=4 train.py \
-    --train_dataset "1000 @ Co3d(split='train', ROOT='data/co3d_subset_processed', aug_crop='auto', aug_monocular=0.005, aug_rot90='diff', mask_bg='rand', resolution=[(512, 384), (512, 336), (512, 288), (512, 256), (512, 160)], n_corres=8192, nneg=0.5, transform=ColorJitter)" \
-    --test_dataset "100 @ Co3d(split='test', ROOT='data/co3d_subset_processed', resolution=(512,384), n_corres=1024, seed=777)" \
-    --model "AsymmetricMASt3R(pos_embed='RoPE100', patch_embed_cls='ManyAR_PatchEmbed', img_size=(512, 512), head_type='catmlp+dpt', output_mode='pts3d+desc24', depth_mode=('exp', -inf, inf), conf_mode=('exp', 1, inf), enc_embed_dim=1024, enc_depth=24, enc_num_heads=16, dec_embed_dim=768, dec_depth=12, dec_num_heads=12, two_confs=True)" \
-    --train_criterion "ConfLoss(Regr3D(L21, norm_mode='?avg_dis'), alpha=0.2) + 0.075*ConfMatchingLoss(MatchingLoss(InfoNCE(mode='proper', temperature=0.05), negatives_padding=0, blocksize=8192), alpha=10.0, confmode='mean')" \
-    --test_criterion "Regr3D_ScaleShiftInv(L21, norm_mode='?avg_dis', gt_scale=True, sky_loss_value=0) + -1.*MatchingLoss(APLoss(nq='torch', fp=torch.float16), negatives_padding=12288)" \
-    --pretrained "checkpoints/DUSt3R_ViTLarge_BaseDecoder_512_dpt.pth" \
-    --lr 0.0001 --min_lr 1e-06 --warmup_epochs 1 --epochs 10 --batch_size 4 --accum_iter 4 \
-    --save_freq 1 --keep_freq 5 --eval_freq 1 --disable_cudnn_benchmark \
-    --output_dir "checkpoints/mast3r_demo"
-
-```
-
-### Our Hyperparameters
-We didn't release all the training datasets, but here are the commands we used for training our models:
-
-```bash
-# MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric - train mast3r with metric regression and matching loss
-# we used cosxl to generate variations of DL3DV: "foggy", "night", "rainy", "snow", "sunny" but we were not convinced by it.
-
-torchrun --nproc_per_node=8 train.py \
-    --train_dataset "57_000 @ Habitat512(1_000_000, split='train', resolution=[(512, 384), (512, 336), (512, 288), (512, 256), (512, 160)], aug_crop='auto', aug_monocular=0.005, transform=ColorJitter, n_corres=8192, nneg=0.5) + 68_400 @ BlendedMVS(split='train', mask_sky=True, resolution=[(512, 384), (512, 336), (512, 288), (512, 256), (512, 160)], aug_crop='auto', aug_monocular=0.005, transform=ColorJitter, n_corres=8192, nneg=0.5) + 68_400 @ MegaDepth(split='train', mask_sky=True, resolution=[(512, 384), (512, 336), (512, 288), (512, 256), (512, 160)], aug_crop='auto', aug_monocular=0.005, transform=ColorJitter, n_corres=8192, nneg=0.5) + 45_600 @ ARKitScenes(split='train', resolution=[(512, 384), (512, 336), (512, 288), (512, 256), (512, 160)], aug_crop='auto', aug_monocular=0.005, transform=ColorJitter, n_corres=8192, nneg=0.5) + 22_800 @ Co3d(split='train', mask_bg='rand', resolution=[(512, 384), (512, 336), (512, 288), (512, 256), (512, 160)], aug_crop='auto', aug_monocular=0.005, transform=ColorJitter, n_corres=8192, nneg=0.5) + 22_800 @ StaticThings3D(mask_bg='rand', resolution=[(512, 384), (512, 336), (512, 288), (512, 256), (512, 160)], aug_crop='auto', aug_monocular=0.005, transform=ColorJitter, n_corres=8192, nneg=0.5) + 45_600 @ ScanNetpp(split='train', resolution=[(512, 384), (512, 336), (512, 288), (512, 256), (512, 160)], aug_crop='auto', aug_monocular=0.005, transform=ColorJitter, n_corres=8192, nneg=0.5) + 45_600 @ TartanAir(pairs_subset='', resolution=[(512, 384), (512, 336), (512, 288), (512, 256), (512, 160)], aug_crop='auto', aug_monocular=0.005, transform=ColorJitter, n_corres=8192, nneg=0.5) + 4_560 @ UnrealStereo4K(resolution=[(512, 384), (512, 336), (512, 288), (512, 256), (512, 160)], aug_crop='auto', aug_monocular=0.005, transform=ColorJitter, n_corres=8192, nneg=0.5) + 1_140 @ VirtualKitti(optical_center_is_centered=True, resolution=[(512, 384), (512, 336), (512, 288), (512, 256), (512, 160)], aug_crop='auto', aug_monocular=0.005, transform=ColorJitter, n_corres=8192, nneg=0.5) + 22_800 @ WildRgbd(split='train', mask_bg='rand', resolution=[(512, 384), (512, 336), (512, 288), (512, 256), (512, 160)], aug_crop='auto', aug_monocular=0.005, transform=ColorJitter, n_corres=8192, nneg=0.5) + 145_920 @ NianticMapFree(split='train', resolution=[(512, 384), (512, 336), (512, 288), (512, 256), (512, 160)], aug_crop='auto', aug_monocular=0.005, transform=ColorJitter, n_corres=8192, nneg=0.5) + 57_000 @ DL3DV(split='nlight', resolution=[(512, 384), (512, 336), (512, 288), (512, 256), (512, 160)], aug_crop='auto', aug_monocular=0.005, transform=ColorJitter, n_corres=8192, nneg=0.5) + 57_000 @ DL3DV(split='not-nlight', cosxl_augmentations=None, resolution=[(512, 384), (512, 336), (512, 288), (512, 256), (512, 160)], aug_crop='auto', aug_monocular=0.005, transform=ColorJitter, n_corres=8192, nneg=0.5) + 34_200 @ InternalUnreleasedDataset(resolution=[(512, 384), (512, 336), (512, 288), (512, 256), (512, 160)], aug_crop='auto', aug_monocular=0.005, transform=ColorJitter, n_corres=8192, nneg=0.5)" \
-    --test_dataset "Habitat512(1_000, split='val', resolution=(512,384), seed=777, n_corres=1024) + 1_000 @ BlendedMVS(split='val', resolution=(512,384), mask_sky=True, seed=777, n_corres=1024) + 1_000 @ ARKitScenes(split='test', resolution=(512,384), seed=777, n_corres=1024) + 1_000 @ MegaDepth(split='val', mask_sky=True, resolution=(512,336), seed=777, n_corres=1024) + 1_000 @ Co3d(split='test', resolution=(512,384), mask_bg='rand', seed=777, n_corres=1024)" \
-    --model "AsymmetricMASt3R(pos_embed='RoPE100', patch_embed_cls='ManyAR_PatchEmbed', img_size=(512, 512), head_type='catmlp+dpt', output_mode='pts3d+desc24', depth_mode=('exp', -inf, inf), conf_mode=('exp', 1, inf), enc_embed_dim=1024, enc_depth=24, enc_num_heads=16, dec_embed_dim=768, dec_depth=12, dec_num_heads=12, two_confs=True, desc_conf_mode=('exp', 0, inf))" \
-    --train_criterion "ConfLoss(Regr3D(L21, norm_mode='?avg_dis'), alpha=0.2, loss_in_log=False) + 0.075*ConfMatchingLoss(MatchingLoss(InfoNCE(mode='proper', temperature=0.05), negatives_padding=0, blocksize=8192), alpha=10.0, confmode='mean')" \
-    --test_criterion "Regr3D(L21, norm_mode='?avg_dis', gt_scale=True, sky_loss_value=0) + -1.*MatchingLoss(APLoss(nq='torch', fp=torch.float16), negatives_padding=12288)" \
-    --pretrained "checkpoints/DUSt3R_ViTLarge_BaseDecoder_512_dpt.pth" \
-    --lr 0.0001 --min_lr 1e-06 --warmup_epochs 8 --epochs 50 --batch_size 4 --accum_iter 2 \
-    --save_freq 1 --keep_freq 5 --eval_freq 1 --print_freq=10 --disable_cudnn_benchmark \
-    --output_dir "checkpoints/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric"
-
-```
-
-## Visual Localization
-
-### Dataset preparation
-
-See [Visloc section in DUSt3R](https://github.com/naver/dust3r/blob/main/dust3r_visloc/README.md#dataset-preparation)
-
-### Example Commands
-
-With `visloc.py` you can run our visual localization experiments on Aachen-Day-Night, InLoc, Cambridge Landmarks and 7 Scenes.
-
-
-```bash
-# Aachen-Day-Night-v1.1:
-# scene in 'day' 'night'
-# scene can also be 'all'
-python3 visloc.py --model_name MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric --dataset "VislocAachenDayNight('/path/to/prepared/Aachen-Day-Night-v1.1/', subscene='${scene}', pairsfile='fire_top50', topk=20)" --pixel_tol 5 --pnp_mode poselib --reprojection_error_diag_ratio 0.008 --output_dir /path/to/output/Aachen-Day-Night-v1.1/${scene}/loc
-
-# or with coarse to fine:
-
-python3 visloc.py --model_name MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric --dataset "VislocAachenDayNight('/path/to/prepared/Aachen-Day-Night-v1.1/', subscene='${scene}', pairsfile='fire_top50', topk=20)" --pixel_tol 5 --pnp_mode poselib --reprojection_error_diag_ratio 0.008 --output_dir /path/to/output/Aachen-Day-Night-v1.1/${scene}/loc --coarse_to_fine --max_batch_size 48 --c2f_crop_with_homography
-
-# InLoc
-python3 visloc.py --model_name MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric --dataset "VislocInLoc('/path/to/prepared/InLoc/', pairsfile='pairs-query-netvlad40-temporal', topk=20)" --pixel_tol 5 --pnp_mode poselib --reprojection_error_diag_ratio 0.008 --output_dir /path/to/output/InLoc/loc
-
-# or with coarse to fine:
-
-python3 visloc.py --model_name MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric --dataset "VislocInLoc('/path/to/prepared/InLoc/', pairsfile='pairs-query-netvlad40-temporal', topk=20)" --pixel_tol 5 --pnp_mode poselib --reprojection_error_diag_ratio 0.008 --output_dir /path/to/output/InLoc/loc --coarse_to_fine --max_image_size 1200 --max_batch_size 48 --c2f_crop_with_homography
-
-# 7-scenes:
-# scene in 'chess' 'fire' 'heads' 'office' 'pumpkin' 'redkitchen' 'stairs'
-python3 visloc.py --model_name MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric --dataset "VislocSevenScenes('/path/to/prepared/7-scenes/', subscene='${scene}', pairsfile='APGeM-LM18_top20', topk=1)" --pixel_tol 5 --pnp_mode poselib --reprojection_error_diag_ratio 0.008 --output_dir /path/to/output/7-scenes/${scene}/loc
-
-# Cambridge Landmarks:
-# scene in 'ShopFacade' 'GreatCourt' 'KingsCollege' 'OldHospital' 'StMarysChurch'
-python3 visloc.py --model_name MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric --dataset "VislocCambridgeLandmarks('/path/to/prepared/Cambridge_Landmarks/', subscene='${scene}', pairsfile='APGeM-LM18_top50', topk=20)" --pixel_tol 5 --pnp_mode poselib --reprojection_error_diag_ratio 0.008 --output_dir /path/to/output/Cambridge_Landmarks/${scene}/loc
-
+## More Information
+
+For the original MASt3R demo and training code, see the [full documentation](https://github.com/naver/mast3r).
+
+## Citation
+
+```bibtex
+@misc{mast3r_eccv24,
+      title={Grounding Image Matching in 3D with MASt3R},
+      author={Vincent Leroy and Yohann Cabon and Jerome Revaud},
+      booktitle = {ECCV},
+      year = {2024}
+}
 ```

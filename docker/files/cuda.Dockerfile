@@ -22,7 +22,7 @@ RUN python setup.py build_ext --inplace
 
 WORKDIR /mast3r
 RUN pip install -r requirements.txt
-
+RUN pip install --upgrade gradio==5.50
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 

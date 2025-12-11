@@ -279,9 +279,9 @@ def main_demo(tmpdirname, model, retrieval_model, device, image_size, server_nam
         css = """.gradio-container {margin: 0 !important; min-width: 100%};"""
         title = "MASt3R Demo"
         if delete_cache:
-            return gradio.Blocks(css=css, title=title, delete_cache=(delete_cache, delete_cache))
+            return gradio.Blocks(title=title, delete_cache=(delete_cache, delete_cache))
         else:
-            return gradio.Blocks(css=css, title="MASt3R Demo")  # for compatibility with older versions
+            return gradio.Blocks(title="MASt3R Demo")  # for compatibility with older versions
 
     with get_context(gradio_delete_cache) as demo:
         # scene state is save so that you can change conf_thr, cam_size... without rerunning the inference

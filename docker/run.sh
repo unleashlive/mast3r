@@ -35,9 +35,9 @@ set_dcomp() {
 run_docker() {
     export MODEL=${model_name}
     if [ "$with_cuda" -eq 1 ]; then
-        $dcomp -f docker-compose-cuda.yml up --build
+        $dcomp -f docker-compose-cuda.yml up --build --force-recreate
     else
-        $dcomp -f docker-compose-cpu.yml up --build
+        $dcomp -f docker-compose-cpu.yml up --build --force-recreate
     fi
 }
 
