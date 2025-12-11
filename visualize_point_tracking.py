@@ -108,6 +108,80 @@ class InteractivePointTracker:
         self.processor_thread = threading.Thread(target=self._process_points, daemon=True)
         self.processor_thread.start()
 
+    def _sample_elevated_point(self, query_point_inference):
+        """
+        Sample a region around the clicked point and return coordinates with maximum Z.
+        This helps capture elevated objects (power lines) instead of ground projections.
+        Uses larger radius and detects local maxima above neighborhood average.
+
+        Args:
+            query_point_inference: (x, y) tuple in inference coordinates
+
+        Returns:
+            (x, y) tuple, potentially adjusted to elevated point location
+        """
+        # Get 3D points from reference image
+        with torch.no_grad():
+            # Run inference on just the reference image to get pts3d
+            output = inference([(self.ref_img_data, self.ref_img_data)], self.model,
+                             self.device, batch_size=1, verbose=False)
+
+        pts3d_ref = output['pred1']['pts3d'].squeeze(0).detach().cpu().numpy()
+
+        qx, qy = int(round(query_point_inference[0])), int(round(query_point_inference[1]))
+
+        # Use larger radius to better capture insulator structures
+        radius = 20  # pixels in inference space (increased from 5)
+        max_z = -float('inf')
+        best_x, best_y = qx, qy
+        original_z = None
+
+        # Collect all valid Z values in the neighborhood for statistics
+        z_values = []
+
+        if 0 <= qy < pts3d_ref.shape[0] and 0 <= qx < pts3d_ref.shape[1]:
+            original_z = pts3d_ref[qy, qx, 2]
+
+        # Search in larger radius for elevated points
+        for dy in range(-radius, radius + 1):
+            for dx in range(-radius, radius + 1):
+                px = qx + dx
+                py = qy + dy
+
+                if 0 <= py < pts3d_ref.shape[0] and 0 <= px < pts3d_ref.shape[1]:
+                    z = pts3d_ref[py, px, 2]
+                    if np.isfinite(z):
+                        z_values.append(z)
+                        if z > max_z:
+                            max_z = z
+                            best_x, best_y = px, py
+
+        if len(z_values) > 0:
+            # Calculate local neighborhood statistics
+            z_median = np.median(z_values)
+            z_mean = np.mean(z_values)
+            z_std = np.std(z_values)
+
+            # Look for points significantly elevated above the local neighborhood
+            # Use median as baseline (more robust to outliers than mean)
+            z_diff = max_z - z_median
+
+            # Only adjust if the max point is significantly elevated (>0.2 units OR >1.5 std devs)
+            threshold = max(0.2, 1.5 * z_std) if z_std > 0 else 0.2
+
+            if z_diff > threshold:
+                print(f"\n  📍 Elevated point sampling (radius={radius}px):")
+                z_str = f"{original_z:.3f}" if original_z is not None else "N/A"
+                print(f"     Original click: ({qx}, {qy}) at Z={z_str}")
+                print(f"     Local neighborhood: median Z={z_median:.3f}, std={z_std:.3f}")
+                print(f"     Adjusted to: ({best_x}, {best_y}) at Z={max_z:.3f}")
+                print(f"     Height gain: {z_diff:.3f} units above median (captured elevated object!)")
+                return (best_x, best_y)
+            else:
+                print(f"\n  📍 Elevated point sampling: No significant elevation found (max gain: {z_diff:.3f} < {threshold:.3f})")
+
+        return query_point_inference
+
     def collect_bbox_for_target(self, target_img_path, target_idx, total_targets):
         """
         Show target image and let user draw bounding box interactively.
@@ -458,10 +532,10 @@ class InteractivePointTracker:
         pts3d_ref = pred1['pts3d'].squeeze(0).detach().cpu().numpy()
         pts3d_target = pred2['pts3d_in_other_view'].squeeze(0).detach().cpu().numpy()
 
-        # Find matches
+        # Find matches with denser sampling for better bbox coverage
         matches_im0, matches_im1 = fast_reciprocal_NNs(
             desc1, desc2,
-            subsample_or_initxy1=8,
+            subsample_or_initxy1=2,  # Reduced from 8 for 4x denser matches
             device=self.device,
             dist='dot',
             block_size=2**13
@@ -482,20 +556,27 @@ class InteractivePointTracker:
         if 0 <= qy < pts3d_ref.shape[0] and 0 <= qx < pts3d_ref.shape[1]:
             query_z = pts3d_ref[qy, qx, 2]
 
-        # Determine height threshold
-        height_threshold = None
+        # Determine height threshold (range around query point)
+        height_threshold_min = None
+        height_threshold_max = None
         if self.args.min_height is not None:
-            height_threshold = self.args.min_height
+            height_threshold_min = self.args.min_height
         elif query_z is not None and np.isfinite(query_z):
-            height_threshold = query_z - self.args.height_tolerance
+            # Use RANGE around query height (not just minimum)
+            height_threshold_min = query_z - self.args.height_tolerance
+            height_threshold_max = query_z + self.args.height_tolerance
+            print(f"\n  Height filtering: Query Z = {query_z:.3f}")
+            print(f"  Accepting matches in range: [{height_threshold_min:.3f}, {height_threshold_max:.3f}]")
 
         # Collect all matches from all bboxes, then find THE BEST one
         print(f"\n  → Finding best match across {len(bbox_state['bboxes'])} bounding box(es)...")
 
         best_match = None
-        best_distance = float('inf')
+        best_distance = float('inf')  # This will be the score (distance + height_penalty)
+        best_actual_distance = None
         best_bbox_idx = None
         best_bbox = None
+        all_candidates = []  # Store all candidates for visualization
 
         for bbox_idx, bbox_display in enumerate(bbox_state['bboxes'], 1):
             print(f"    Checking Box #{bbox_idx}...")
@@ -516,7 +597,8 @@ class InteractivePointTracker:
                 query_point_inference, matches_im0_filtered, matches_im1_filtered,
                 pts3d_ref=pts3d_ref,
                 pts3d_target=pts3d_target,
-                min_height=height_threshold
+                min_height=height_threshold_min,
+                max_height=height_threshold_max
             )
 
             matched_point = matches_im1_filtered[nearest_idx]
@@ -525,38 +607,90 @@ class InteractivePointTracker:
             matched_x = matched_point[0] / target_scale_x
             matched_y = matched_point[1] / target_scale_y
 
-            print(f"      Candidate: ({matched_x:.1f}, {matched_y:.1f}) | Distance: {distance:.2f}px")
+            # Get the 3D height of this match for logging
+            mx_idx = int(round(matched_point[0]))
+            my_idx = int(round(matched_point[1]))
+            match_z = None
+            if 0 <= my_idx < pts3d_target.shape[0] and 0 <= mx_idx < pts3d_target.shape[1]:
+                match_z = pts3d_target[my_idx, mx_idx, 2]
 
-            # Keep track of the best match across all boxes
-            if distance < best_distance:
-                best_distance = distance
+            # Calculate height-aware score (penalize height differences)
+            height_penalty = 0.0
+            if query_z is not None and match_z is not None and np.isfinite(query_z) and np.isfinite(match_z):
+                height_diff = abs(match_z - query_z)
+                # Penalize height difference: add 100px per unit height difference
+                height_penalty = height_diff * 100.0
+                print(f"      Candidate: ({matched_x:.1f}, {matched_y:.1f}) | 2D dist: {distance:.2f}px | Height: {match_z:.3f} (Δ{height_diff:.3f}) | Score: {distance + height_penalty:.2f}")
+            else:
+                print(f"      Candidate: ({matched_x:.1f}, {matched_y:.1f}) | Distance: {distance:.2f}px | Height: N/A")
+
+            # Use height-aware score for comparison
+            score = distance + height_penalty
+
+            # Store this candidate for visualization
+            all_candidates.append({
+                'bbox_idx': bbox_idx,
+                'bbox': bbox_display,
+                'matched_point': (matched_x, matched_y),
+                'distance': distance,
+                'score': score,
+                'height': match_z if match_z is not None and np.isfinite(match_z) else None
+            })
+
+            # Keep track of the best match across all boxes (lowest score)
+            if score < best_distance:
+                best_distance = score
                 best_match = (matched_x, matched_y)
                 best_bbox_idx = bbox_idx
                 best_bbox = bbox_display
+                best_actual_distance = distance  # Store the actual 2D distance for display
 
         # Create result for the single best match
         results = []
         if best_match is not None:
-            print(f"\n  ✓ Best match found in Box #{best_bbox_idx}: {best_match} | Distance: {best_distance:.2f}px")
+            print(f"\n  ✓ Best match found in Box #{best_bbox_idx}: {best_match} | Distance: {best_actual_distance:.2f}px | Score: {best_distance:.2f}")
             results.append({
                 'bbox_idx': best_bbox_idx,
                 'bbox': best_bbox,
                 'matched_point': best_match,
-                'distance': best_distance
+                'distance': best_actual_distance if best_actual_distance is not None else best_distance
             })
 
-            # Show result inline (pass all bboxes to show unselected ones too)
+            # Show result inline (pass all bboxes and candidates)
             self._show_inline_results(target_img, target_idx, query_point, results,
-                                     os.path.basename(target_img_path), all_bboxes=bbox_state['bboxes'])
+                                     os.path.basename(target_img_path),
+                                     all_bboxes=bbox_state['bboxes'],
+                                     all_candidates=all_candidates)
         else:
             print(f"\n  ⚠ No matches found in any bounding box!")
 
         return results
 
-    def _show_inline_results(self, target_img, target_idx, query_point, results, img_name, all_bboxes=None):
+    def _show_inline_results(self, target_img, target_idx, query_point, results, img_name, all_bboxes=None, all_candidates=None):
         """Display matching results inline on the target image."""
         fig, ax = plt.subplots(figsize=(16, 12))
         ax.imshow(target_img)
+
+        # Draw all candidate matches as gray circles
+        if all_candidates:
+            for candidate in all_candidates:
+                cx, cy = candidate['matched_point']
+                bbox_idx = candidate['bbox_idx']
+
+                # Check if this is the selected match
+                is_selected = False
+                if results and len(results) > 0:
+                    if results[0]['bbox_idx'] == bbox_idx:
+                        is_selected = True
+
+                if not is_selected:
+                    # Draw gray circle for non-selected candidates
+                    ax.plot(cx, cy, 'o', color='gray', markersize=12,
+                           markeredgecolor='white', markeredgewidth=2, alpha=0.6)
+                    # Add box number label
+                    ax.text(cx + 15, cy - 15, f"#{bbox_idx}",
+                           color='gray', fontsize=10, alpha=0.7,
+                           bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.7))
 
         # Draw all bounding boxes in gray (not selected)
         if all_bboxes:
@@ -742,10 +876,10 @@ class InteractivePointTracker:
                     pts3d_ref = pred1['pts3d'].squeeze(0).detach().cpu().numpy()
                     pts3d_target = pred2['pts3d_in_other_view'].squeeze(0).detach().cpu().numpy()
 
-                    # Find matches
+                    # Find matches with denser sampling for better bbox coverage
                     matches_im0, matches_im1 = fast_reciprocal_NNs(
                         desc1, desc2,
-                        subsample_or_initxy1=8,
+                        subsample_or_initxy1=2,  # Reduced from 8 for 4x denser matches
                         device=self.device,
                         dist='dot',
                         block_size=2**13
@@ -927,10 +1061,13 @@ class InteractivePointTracker:
                     print("="*60)
 
                     query_point = (x, y)
-                    query_point_inference = (
+                    query_point_inference_base = (
                         x * self.scale_x,
                         y * self.scale_y
                     )
+
+                    # Sample elevated point to get correct height (not ground projection)
+                    query_point_inference = self._sample_elevated_point(query_point_inference_base)
 
                     # Process each target image with multi-bbox workflow
                     for target_idx in range(1, len(self.image_files)):
